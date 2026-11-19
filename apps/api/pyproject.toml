@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vxg-api"
+version = "0.1.0"
+description = "FastAPI read and audit API server for vxg-tracker"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "vxg-shared",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

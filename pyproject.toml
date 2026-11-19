@@ -1,0 +1,47 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = [
+    "packages/shared-py/src",
+    "apps/api/src",
+    "apps/worker/src",
+    "tests",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vxg_shared", "vxg_api", "vxg_worker"]
+
+[tool.mypy]
+python_version = "3.12"
+explicit_package_bases = true
+namespace_packages = true
+mypy_path = [
+    "packages/shared-py/src",
+    "apps/api/src",
+    "apps/worker/src",
+]
+warn_unused_configs = true
+warn_return_any = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["alembic.*", "lxml.*", "apscheduler.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+    "packages/shared-py/src",
+    "apps/api/src",
+    "apps/worker/src",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"
+

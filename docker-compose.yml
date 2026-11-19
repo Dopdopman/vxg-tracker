@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vxg_postgres
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      PGTZ: ${PGTZ:-Asia/Ho_Chi_Minh}
+      POSTGRES_USER: ${POSTGRES_USER:-vxg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vxg_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-vxg_tracker}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  migrator:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: vxg_migrator
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://vxg:vxg_dev_password@postgres:5432/vxg_tracker}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg://vxg:vxg_dev_password@postgres:5432/vxg_tracker}
+    command:
+      - sh
+      - -c
+      - alembic -c /app/packages/shared-py/alembic.ini upgrade head && python -m vxg_shared.db.seed
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: vxg_api
+    restart: unless-stopped
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://vxg:vxg_dev_password@postgres:5432/vxg_tracker}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg://vxg:vxg_dev_password@postgres:5432/vxg_tracker}
+      PORT: ${API_PORT:-8000}
+      API_PORT: ${API_PORT:-8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-${API_CORS_ORIGINS:-http://localhost:3000}}
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:3000}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-change-me-local-admin-key}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    container_name: vxg_worker
+    restart: unless-stopped
+    mem_limit: 1g
+    shm_size: "256mb"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://vxg:vxg_dev_password@postgres:5432/vxg_tracker}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg://vxg:vxg_dev_password@postgres:5432/vxg_tracker}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
+      PRICE_SPIKE_THRESHOLD_PCT: ${PRICE_SPIKE_THRESHOLD_PCT:-15.0}
+      SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:-90}
+      SCRAPER_HTTP_PROXY: ${SCRAPER_HTTP_PROXY:-}
+      ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}
+      ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}
+      ALERT_DISCORD_WEBHOOK_URL: ${ALERT_DISCORD_WEBHOOK_URL:-${DISCORD_WEBHOOK_URL:-}}
+      HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    container_name: vxg_web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-${INTERNAL_API_BASE_URL:-http://api:8000}}
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://api:8000}
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+

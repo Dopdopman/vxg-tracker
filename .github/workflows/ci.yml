@@ -1,0 +1,228 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Ho_Chi_Minh
+
+jobs:
+  backend-quality-and-unit:
+    name: Backend Quality & Offline Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install backend & quality dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python \
+            -e ./packages/shared-py \
+            -e ./apps/api \
+            -e ./apps/worker \
+            ruff mypy pytest pytest-asyncio
+
+      - name: Run Ruff linter
+        run: .venv/bin/ruff check packages apps/api apps/worker tests
+
+      - name: Run Mypy strict typecheck
+        run: .venv/bin/mypy packages/shared-py/src apps/api/src apps/worker/src tests
+
+      - name: Run offline unit tests (Golden Fixtures, Guardrails, Hardening)
+        run: .venv/bin/pytest tests/unit -v
+
+  backend-integration-postgres:
+    name: Backend PostgreSQL Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vxg
+          POSTGRES_PASSWORD: vxg_dev_password
+          POSTGRES_DB: vxg_tracker
+          TZ: Asia/Ho_Chi_Minh
+          PGTZ: Asia/Ho_Chi_Minh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vxg -d vxg_tracker"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://vxg:vxg_dev_password@localhost:5432/vxg_tracker
+      DATABASE_URL_SYNC: postgresql+psycopg://vxg:vxg_dev_password@localhost:5432/vxg_tracker
+      TEST_DATABASE_URL: postgresql+asyncpg://vxg:vxg_dev_password@localhost:5432/vxg_tracker
+      APP_ENV: development
+      ADMIN_API_KEY: ci-integration-test-admin-key-24chars
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install backend & test dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python \
+            -e ./packages/shared-py \
+            -e ./apps/api \
+            -e ./apps/worker \
+            pytest pytest-asyncio
+
+      - name: Run Alembic migrations
+        run: .venv/bin/alembic -c packages/shared-py/alembic.ini upgrade head
+
+      - name: Verify seed.py idempotency (run twice)
+        run: |
+          .venv/bin/python -m vxg_shared.db.seed
+          .venv/bin/python -m vxg_shared.db.seed
+
+      - name: Verify seeded catalog counts
+        run: |
+          .venv/bin/python - <<'PY'
+          import asyncio
+          from sqlalchemy import func, select
+          from vxg_shared.db.engine import create_async_db_engine, create_session_factory
+          from vxg_shared.db.models import Commodity, Location, Source
+
+          async def verify() -> None:
+              engine = create_async_db_engine("postgresql+asyncpg://vxg:vxg_dev_password@localhost:5432/vxg_tracker")
+              try:
+                  async with create_session_factory(engine)() as session:
+                      locs = (await session.execute(select(func.count(Location.id)))).scalar_one()
+                      comms = (await session.execute(select(func.count(Commodity.id)))).scalar_one()
+                      srcs = (await session.execute(select(func.count(Source.id)))).scalar_one()
+                      active_srcs = (
+                          await session.execute(
+                              select(func.count(Source.id)).where(Source.is_active.is_(True))
+                          )
+                      ).scalar_one()
+                  assert locs == 5, f"Expected 5 locations, got {locs}"
+                  assert comms == 18, f"Expected 18 commodities, got {comms}"
+                  assert srcs == 14, f"Expected 14 total source rows, got {srcs}"
+                  assert active_srcs == 11, f"Expected 11 active sources, got {active_srcs}"
+              finally:
+                  await engine.dispose()
+
+          asyncio.run(verify())
+          PY
+
+      - name: Run PostgreSQL integration tests (Worker & FastAPI)
+        run: .venv/bin/pytest tests/integration -v
+
+  frontend-ci:
+    name: Frontend Lint, Typecheck, Build & Security Scan
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir apps/web install --frozen-lockfile
+
+      - name: Run ESLint
+        run: pnpm --dir apps/web lint
+
+      - name: Run TypeScript typecheck
+        run: pnpm --dir apps/web typecheck
+
+      - name: Run Next.js production build
+        run: pnpm --dir apps/web build
+
+      - name: Verify no secret leakage in .next/static bundle
+        run: |
+          if grep -rniE "ADMIN_API_KEY|change-me-local-admin-key" apps/web/.next/static; then
+            echo "ERROR: Sensitive admin secret reference leaked into client bundle!"
+            exit 1
+          fi
+          echo "Static client bundle security scan passed (0 matches)."
+
+  docker-build-verify:
+    name: Verify Production Docker Builds
+    needs: [backend-quality-and-unit, backend-integration-postgres, frontend-ci]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          tags: vxg-tracker-api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build Worker Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: false
+          tags: vxg-tracker-worker:ci
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+      - name: Build Web Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          tags: vxg-tracker-web:ci
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost:8000
+            NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+

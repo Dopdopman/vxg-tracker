@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Node / Next.js
+node_modules/
+apps/web/.next/
+apps/web/out/
+npm-debug.log*
+pnpm-debug.log*
+.tsbuildinfo
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# OS & Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
