@@ -1,0 +1,125 @@
+name: Crawl Schedule & On-Demand Worker
+
+on:
+  schedule:
+    # 08:45 Asia/Ho_Chi_Minh -> 01:45 UTC (Sáng: cập nhật Vàng)
+    - cron: "45 1 * * *"
+    # 11:30 Asia/Ho_Chi_Minh -> 04:30 UTC (Trưa: cập nhật Vàng)
+    - cron: "30 4 * * *"
+    # 15:20 Asia/Ho_Chi_Minh -> 08:20 UTC (Chiều + kỳ điều hành Xăng dầu Thứ Năm)
+    - cron: "20 8 * * *"
+    # 17:15 Asia/Ho_Chi_Minh -> 10:15 UTC (Chốt ngày: quét đủ Vàng, Xăng dầu, Gas)
+    - cron: "15 10 * * *"
+    # 03:15 Asia/Ho_Chi_Minh -> 20:15 UTC (Dọn snapshot quá hạn + quét Gas ngày mùng 1)
+    - cron: "15 20 * * *"
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "Phạm vi thu thập dữ liệu (ALL, GOLD, FUEL, GAS)"
+        required: true
+        type: choice
+        default: "ALL"
+        options:
+          - "ALL"
+          - "GOLD"
+          - "FUEL"
+          - "GAS"
+      run_id:
+        description: "UUID của CrawlRun QUEUED cần thực thi (tùy chọn)"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: crawl-worker
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Ho_Chi_Minh
+  APP_ENV: production
+  SNAPSHOT_RETENTION_DAYS: "90"
+
+jobs:
+  crawl-worker:
+    name: Run Scraper Worker & 6-Layer Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install shared & worker Python dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python \
+            -e ./packages/shared-py \
+            -e ./apps/worker
+
+      - name: Resolve installed Playwright version
+        id: pw-ver
+        run: |
+          echo "version=$(.venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright Chromium browser binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw-ver.outputs.version }}
+
+      - name: Install Playwright OS dependencies & Chromium
+        run: |
+          .venv/bin/playwright install-deps chromium
+          .venv/bin/playwright install chromium
+
+      - name: Execute scheduled or dispatched worker task
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
+          ALERT_DISCORD_WEBHOOK_URL: ${{ secrets.ALERT_DISCORD_WEBHOOK_URL }}
+          PRICE_SPIKE_THRESHOLD_PCT: "15.0"
+          SCRAPER_HTTP_PROXY: ${{ secrets.SCRAPER_HTTP_PROXY }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ERROR: GitHub Actions secret DATABASE_URL is not configured."
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SCOPE="${{ inputs.scope }}"
+            RUN_ID="${{ inputs.run_id }}"
+            if [ -n "$RUN_ID" ]; then
+              .venv/bin/python -m vxg_worker.cli run --run-id "$RUN_ID" --scope "$SCOPE" --trigger MANUAL_ADMIN
+            else
+              .venv/bin/python -m vxg_worker.cli run --scope "$SCOPE" --trigger MANUAL_ADMIN
+            fi
+          else
+            case "${{ github.event.schedule }}" in
+              "45 1 * * *"|"30 4 * * *")
+                .venv/bin/python -m vxg_worker.cli run --scope GOLD --trigger SCHEDULED
+                ;;
+              "20 8 * * *"|"15 10 * * *")
+                .venv/bin/python -m vxg_worker.cli run --scope ALL --trigger SCHEDULED
+                ;;
+              "15 20 * * *")
+                .venv/bin/python -m vxg_worker.cli prune-snapshots --retention-days "${SNAPSHOT_RETENTION_DAYS:-90}"
+                if [ "$(TZ=Asia/Ho_Chi_Minh date +%d)" = "01" ]; then
+                  .venv/bin/python -m vxg_worker.cli run --scope GAS --trigger SCHEDULED
+                fi
+                ;;
+              *)
+                .venv/bin/python -m vxg_worker.cli run --scope ALL --trigger SCHEDULED
+                ;;
+            esac
+          fi
+

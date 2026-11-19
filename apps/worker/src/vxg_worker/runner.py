@@ -198,7 +198,11 @@ class CrawlRunner:
                 if existing_run_id is not None:
                     run = await session.get(CrawlRun, existing_run_id)
                     if run is None:
-                        raise ValueError(f"Queued CrawlRun {existing_run_id} not found")
+                        raise ValueError(f"CrawlRun {existing_run_id} not found")
+                    if run.status != CrawlRunStatus.QUEUED.value:
+                        raise ValueError(
+                            f"CrawlRun {existing_run_id} is not QUEUED (status={run.status})"
+                        )
                     run.status = CrawlRunStatus.RUNNING.value
                     run.started_at = vn_now()
                     scope = CrawlScope(run.scope_category)
@@ -216,30 +220,42 @@ class CrawlRunner:
                 run_id = run.id
                 run_code = run.run_code
 
-            if self._injected_fetcher is not None:
-                return await self._execute_with_fetcher(
-                    fetcher=self._injected_fetcher,
-                    run_id=run_id,
-                    run_code=run_code,
-                    scope=scope,
-                    trigger_type=trigger_type,
-                    run_mono_start=run_mono_start,
-                    smoke_only=smoke_only,
-                )
+            try:
+                if self._injected_fetcher is not None:
+                    return await self._execute_with_fetcher(
+                        fetcher=self._injected_fetcher,
+                        run_id=run_id,
+                        run_code=run_code,
+                        scope=scope,
+                        trigger_type=trigger_type,
+                        run_mono_start=run_mono_start,
+                        smoke_only=smoke_only,
+                    )
 
-            async with TwoTierFetcher(
-                proxy_url=self._settings.proxy_url,
-                playwright_timeout_ms=self._settings.default_playwright_timeout_ms,
-            ) as owned_fetcher:
-                return await self._execute_with_fetcher(
-                    fetcher=owned_fetcher,
-                    run_id=run_id,
-                    run_code=run_code,
-                    scope=scope,
-                    trigger_type=trigger_type,
-                    run_mono_start=run_mono_start,
-                    smoke_only=smoke_only,
-                )
+                async with TwoTierFetcher(
+                    proxy_url=self._settings.proxy_url,
+                    playwright_timeout_ms=self._settings.default_playwright_timeout_ms,
+                ) as owned_fetcher:
+                    return await self._execute_with_fetcher(
+                        fetcher=owned_fetcher,
+                        run_id=run_id,
+                        run_code=run_code,
+                        scope=scope,
+                        trigger_type=trigger_type,
+                        run_mono_start=run_mono_start,
+                        smoke_only=smoke_only,
+                    )
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - run_mono_start) * 1000)
+                async with self._session_factory() as fail_session:
+                    run_row = await fail_session.get(CrawlRun, run_id)
+                    if run_row is not None:
+                        run_row.status = CrawlRunStatus.FAILED.value
+                        run_row.finished_at = vn_now()
+                        run_row.duration_ms = duration_ms
+                        run_row.error_summary = str(exc)[:2000]
+                        await fail_session.commit()
+                raise
 
     async def _execute_with_fetcher(
         self,

@@ -5,10 +5,10 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool
 
 from vxg_shared.db import models as _models  # noqa: F401
 from vxg_shared.db.base import Base
+from vxg_shared.db.engine import create_sync_db_engine
 from vxg_shared.settings import SharedSettings
 
 config = context.config
@@ -36,24 +36,22 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode using synchronous psycopg driver."""
-    connectable = create_engine(
-        SharedSettings().sync_database_url,
-        poolclass=pool.NullPool,
-    )
+    connectable = create_sync_db_engine(SharedSettings().sync_database_url)
+    try:
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,
+            )
 
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        connectable.dispose()
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

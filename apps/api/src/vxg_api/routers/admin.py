@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, status
+import httpx
+from fastapi import APIRouter, Body, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vxg_api.config import ApiSettings
 from vxg_api.deps import get_db_session, require_admin_api_key
 from vxg_api.errors import ErrorResponse
 from vxg_api.schemas.admin import TriggerCrawlRunRequest, TriggerCrawlRunResponse
@@ -26,12 +28,22 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
         403: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
     },
 )
 async def create_manual_crawl_run(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
     payload: Annotated[TriggerCrawlRunRequest | None, Body()] = None,
 ) -> TriggerCrawlRunResponse:
-    """Queue a manual CrawlRun for asynchronous pickup by vxg-worker."""
+    """Queue a manual CrawlRun for worker pickup or GitHub Actions dispatch."""
     scope = payload.scope if payload is not None else CrawlScope.ALL
-    return await trigger_crawl_run(session, scope=scope)
+    settings: ApiSettings = request.app.state.settings
+    http_client: httpx.AsyncClient | None = getattr(request.app.state, "dispatch_http_client", None)
+    return await trigger_crawl_run(
+        session,
+        scope=scope,
+        settings=settings,
+        http_client=http_client,
+    )

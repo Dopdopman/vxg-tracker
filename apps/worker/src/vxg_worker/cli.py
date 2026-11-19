@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import uuid
 
 from vxg_shared.db.engine import create_async_db_engine, create_session_factory
 from vxg_shared.enums import CrawlScope, TriggerType
@@ -68,6 +69,12 @@ async def _async_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Verify live fetch + snapshot storage + audit telemetry without price parsing",
     )
+    run_p.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional existing QUEUED CrawlRun UUID to execute in place",
+    )
 
     enq_p = subparsers.add_parser("enqueue", help="Insert a QUEUED crawl run for worker daemon")
     enq_p.add_argument(
@@ -119,6 +126,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
             print(f"Enqueued QUEUED CrawlRun: id={run.id} run_code={run.run_code}")
             return 0
 
+        parsed_run_id = (
+            uuid.UUID(args.run_id.strip())
+            if args.run_id and args.run_id.strip()
+            else None
+        )
         runner = CrawlRunner(
             engine=engine,
             session_factory=session_factory,
@@ -127,6 +139,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
         summary = await runner.execute_run(
             scope=CrawlScope(args.scope),
             trigger_type=TriggerType(args.trigger),
+            existing_run_id=parsed_run_id,
             smoke_only=bool(args.smoke_only),
         )
         _print_summary(summary)

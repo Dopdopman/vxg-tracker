@@ -6,61 +6,69 @@ Hệ thống tự động thu thập, kiểm chứng nguồn gốc và hiển th
 
 ---
 
-## Tính năng cốt lõi
+## Kiến trúc 100% Miễn phí chuẩn Production & Local
 
-- **Thu thập dữ liệu 2 tầng (`2-Tier Fetcher`) & Chống chặn bot:** Ưu tiên `httpx` với HTTP header trình duyệt chuẩn `vi-VN`, retry exponential backoff + jitter, tự động fallback sang **Playwright Chromium** headless khi trang render JavaScript hoặc gặp WAF/cookie challenge.
-- **Kiểm chứng 6 tầng (`6-Layer Validation Guardrails`) & Đối chứng chéo:**
-  1. Kiểm tra cấu trúc, URL hợp lệ, `SHA-256`, số nguyên `BIGINT` (`VND`).
-  2. Chặn giá null, âm hoặc bằng `0`.
-  3. Logic nghiệp vụ chuyên ngành (Vàng phải đủ Mua/Bán và `Bán >= Mua`, chênh lệch không vượt ngưỡng; Gas 45kg/48kg nhất quán theo quy cách).
-  4. Kiểm tra biên độ giá hợp lý theo từng nhóm mặt hàng.
-  5. Chống biến động đột biến (`PRICE_SPIKE_THRESHOLD_PCT`, mặc định `15%`) so với bản ghi `VERIFIED` gần nhất; tự động cách ly (`FLAGGED`) nếu bất thường.
-  6. Chuẩn hóa múi giờ `Asia/Ho_Chi_Minh` (`UTC+7`), bảo đảm idempotent upsert và đối chiếu chéo Tier 1 ↔ Tier 2 (`CROSS_CHECKED`).
-- **Kho bằng chứng gốc & Chính sách lưu trữ:** Nén `gzip` payload thô kèm mã băm `content_sha256` chống trùng lặp; tự động dọn snapshot quá hạn (`SNAPSHOT_RETENTION_DAYS`, mặc định `90` ngày) nhưng giữ trọn vẹn lịch sử `price_records` và SHA-256 gắn với mức giá mới nhất.
-- **Giao diện Financial / Editorial (`Next.js 15` + `Tailwind v4`):** Số liệu căn phải dùng `tabular-nums`, quy đổi tức thì **VND / Lượng ↔ VND / Chỉ**, **Evidence Drawer** truy xuất nguồn gốc, và trang `/audit` theo dõi nhật ký phiên cào, sức khỏe 11 nguồn & cảnh báo.
-- **Bảo mật & Cảnh báo vận hành:** Khóa `/api/v1/admin/*` bằng `X-Admin-API-Key` (`hmac.compare_digest`), từ chối khởi động nếu `APP_ENV=production` dùng key yếu/ngắn dưới 24 ký tự, và bắn cảnh báo lỗi nguồn/dữ liệu bất thường qua **Telegram Bot** / **Discord Webhook**.
-
----
-
-## Kiến trúc Hệ thống & Monorepo
+- **Local Development:** Docker Compose 1 lệnh với `postgres` + `migrator` + `api` (`WORKER_DISPATCH_MODE=db_poll`) + `worker` (APScheduler daemon + poll queue) + `web`.
+- **Production Free Stack (Singapore):**
+  - **Neon PostgreSQL 16** (tự động chuẩn hóa `sslmode`/`channel_binding` cho `asyncpg` & `psycopg`, `pool_pre_ping=True`, `pool_recycle=300`).
+  - **Render Free (`vxg-api`)** — FastAPI server cấu hình bằng [`render.yaml`](render.yaml), tự động chạy migration/seed lúc boot qua [`apps/api/entrypoint.sh`](apps/api/entrypoint.sh), nhận nút *"Chạy cào thủ công"* trên `/audit` và dispatch tới GitHub Actions (`WORKER_DISPATCH_MODE=github_actions`).
+  - **GitHub Actions Crawler Worker** ([`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml)) — Chạy lịch định kỳ theo giờ Việt Nam (`UTC+7`) và thực thi theo `--run-id` khi admin kích hoạt thủ công trên UI.
+  - **Vercel Hobby (`apps/web`)** — Next.js 15 App Router deploy tại region `sin1` ([`apps/web/vercel.json`](apps/web/vercel.json)).
 
 ```mermaid
 flowchart LR
-    WEB["Next.js 15 App Router\n(Vercel sin1 · / & /audit)"] -->|"REST API + X-Admin-API-Key"| API["FastAPI Server\n(Railway Singapore · Python 3.12)"]
-    API -->|"Read/Audit + Queue QUEUED runs"| DB[("PostgreSQL 16\n8 Tables · Partial Indexes\nPG Advisory Lock")]
-    WORKER["Scraper & Validator Worker\n(Railway · HTTPX + Playwright\nAPScheduler UTC+7)"] <-->|"Poll Queue + Upsert + Logs"| DB
-    WORKER -->|"2-Tier Fetch & 6-Layer Guardrails"| VN["11 Nguồn Thực Tế VN\n(SJC, DOJI, PNJ, CafeF,\nPetrolimex, Saigon Petro, PV Gas...)"]
-    WORKER -->|"Schema Drift / Blocked / FLAGGED"| ALERT["Telegram Bot /\nDiscord Webhook"]
+    WEB["Next.js 15 App Router\n(Vercel Hobby sin1 · / & /audit)"] -->|"REST API + X-Admin-API-Key"| API["FastAPI Server\n(Render Free Singapore)"]
+    API -->|"Read/Audit + Queue QUEUED runs"| DB[("Neon PostgreSQL 16\nSingapore · SSL + Pre-Ping")]
+    API -.->|"workflow_dispatch (run_id, scope)"| GHA["GitHub Actions Worker\n(crawl-schedule.yml · Cron & On-Demand\nHTTPX + Playwright Chromium)"]
+    GHA <-->|"PG Advisory Lock + Upsert + Logs"| DB
+    GHA -->|"2-Tier Fetch & 6-Layer Guardrails"| VN["11 Nguồn Thực Tế VN\n(SJC, DOJI, PNJ, CafeF,\nPetrolimex, Saigon Petro, PV Gas...)"]
+    GHA -->|"Schema Drift / Blocked / FLAGGED"| ALERT["Telegram Bot /\nDiscord Webhook"]
 ```
 
-### Cấu trúc Monorepo
+---
+
+## Tính năng cốt lõi
+
+- **2-Tier Fetcher & Chống chặn bot:** Ưu tiên `httpx` với HTTP header chuẩn `vi-VN`, retry exponential backoff + jitter; tự fallback sang **Playwright Chromium** headless khi trang render JS hoặc gặp WAF/cookie challenge.
+- **Kiểm chứng 6 tầng (`6-Layer Validation Guardrails`) & Đối chứng chéo:** Kiểm tra kiểu/SHA-256/URL, chặn giá `<= 0`, kiểm tra logic mua/bán & quy cách bình gas, kiểm tra biên độ hợp lý, chống nhảy giá đột biến (`PRICE_SPIKE_THRESHOLD_PCT=15%`), chuẩn hóa `Asia/Ho_Chi_Minh`, idempotent upsert và đối chiếu chéo Tier 1 ↔ Tier 2 (`CROSS_CHECKED`).
+- **Zero Stuck Jobs & Fail-Safe:** Khi ở chế độ `github_actions`, nếu lệnh dispatch sang GitHub API thất bại (timeout hoặc HTTP 4xx/5xx), API lập tức cập nhật bản ghi `crawl_runs` sang `FAILED` và trả mã lỗi `502 GITHUB_DISPATCH_FAILED` thống nhất.
+- **Snapshot Retention 90 ngày:** Tự động xóa bản nén gzip `raw_evidence_snapshots` quá hạn mà vẫn giữ toàn vẹn `price_records`, `crawl_runs` và SHA-256 của mức giá `VERIFIED` mới nhất.
+- **Giao diện Financial / Editorial (`tabular-nums`):** Bảng giá tối giản, quy đổi nhanh **VND / Lượng ↔ VND / Chỉ**, **Evidence Drawer** kiểm chứng nguồn gốc và trang `/audit` đầy đủ.
+
+---
+
+## Cấu trúc Monorepo
 
 | Thành phần | Đường dẫn | Vai trò chính |
 | :--- | :--- | :--- |
-| **Shared Package** | [`packages/shared-py`](packages/shared-py) | SQLAlchemy 2.0 ORM (8 bảng, 7 custom indexes), Alembic migrations, `Asia/Ho_Chi_Minh` timezone, SHA-256 hashing, `seed.py` idempotent |
-| **REST & Audit API** | [`apps/api`](apps/api) | FastAPI `/api/v1/*`, tự map vùng xăng dầu (`HN/DN/HCM -> VUNG_1`), Evidence API, Audit API, Admin queue endpoint |
-| **Scraper Worker** | [`apps/worker`](apps/worker) | 2-Tier Fetcher (`httpx` + Playwright Chromium), 11 adapters VN thật, 6-Layer Guardrails, APScheduler `UTC+7` (10 jobs), `AlertNotifier`, Snapshot Retention |
-| **Web Dashboard** | [`apps/web`](apps/web) | Next.js 15 App Router (`/` Bảng giá hôm nay, Evidence Drawer, `/audit` Kiểm toán & Nhật ký cào) |
-| **CI/CD Workflow** | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Pipeline kiểm tra backend (`ruff`, `mypy`, `pytest` + Postgres), frontend (`lint`, `typecheck`, `build`, secret scan) và build 3 Docker images |
-| **Hướng dẫn Deploy** | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Tài liệu triển khai chi tiết lên **Railway (Singapore)** + **Vercel** và vận hành/backup PostgreSQL |
+| **Shared Package** | [`packages/shared-py`](packages/shared-py) | SQLAlchemy 2.0 ORM (8 bảng), Alembic migrations, Neon SSL/pool normalizer, `Asia/Ho_Chi_Minh` timezone, SHA-256 hashing, `seed.py` |
+| **REST & Audit API** | [`apps/api`](apps/api) | FastAPI `/api/v1/*`, Render [`entrypoint.sh`](apps/api/entrypoint.sh), hỗ trợ `db_poll` & `github_actions` dispatch, Production `ADMIN_API_KEY` guard |
+| **Scraper Worker** | [`apps/worker`](apps/worker) | 2-Tier Fetcher, 11 adapters VN thật, 6-Layer Guardrails, CLI `--run-id`, APScheduler `UTC+7` (local), `AlertNotifier`, Snapshot Retention |
+| **Web Dashboard** | [`apps/web`](apps/web) | Next.js 15 + Tailwind v4 (`/` Bảng giá, Evidence Drawer, `/audit` Kiểm toán & Modal chạy thủ công hỗ trợ cold start) |
+| **CI Workflow** | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lint, `mypy`, offline `pytest`, integration test trên Postgres 16, Next.js build + secret scan, Docker Buildx check |
+| **Crawler Workflow** | [`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml) | Scheduled cron (`UTC+7`) + `workflow_dispatch` nhận `scope` & `run_id` chạy Playwright trên `ubuntu-latest` |
+| **Render Blueprint** | [`render.yaml`](render.yaml) | Cấu hình deploy `vxg-api` miễn phí tại region Singapore |
+| **Hướng dẫn Deploy** | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Hướng dẫn từng bước triển khai **Neon + GitHub Actions + Render Free + Vercel Hobby + cron-job.org** |
 
 ---
 
 ## Danh sách 11 Nguồn Dữ liệu Thực tế đang Active
 
-| Nhóm | Mã nguồn (`code`) | Phân tầng | Chiến lược | Lịch quét (`Asia/Ho_Chi_Minh`) |
+| Nhóm | Mã nguồn (`code`) | Phân tầng | Chiến lược | Lịch quét (`UTC+7`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Vàng** | `SJC_OFFICIAL_XML` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_JSON` | T2–T7: `08:45, 11:30, 14:30, 17:00`; CN: `09:00` |
+| **Vàng** | `SJC_OFFICIAL_XML` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_JSON` | `08:45`, `11:30`, `15:20`, `17:15` |
 | **Vàng** | `DOJI_BOARD` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Cùng lịch Vàng |
 | **Vàng** | `PNJ_HTML` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Cùng lịch Vàng |
 | **Vàng** | `CAFEF_GOLD_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_JSON` | Cùng lịch Vàng |
-| **Xăng dầu** | `PETROLIMEX_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Hàng ngày `07:05` + Thứ 5: `15:15, 15:30, 16:00` |
+| **Xăng dầu** | `PETROLIMEX_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `15:20` & `17:15` (cùng `ALL`) |
 | **Xăng dầu** | `SAIGONPETRO_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | Cùng lịch Xăng dầu |
 | **Xăng dầu** | `WEBGIA_FUEL_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` | Cùng lịch Xăng dầu |
-| **Gas** | `PETROLIMEX_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Hàng ngày `07:30` + Ngày 1–2 đầu tháng: `06:30, 08:30, 10:30` |
+| **Gas** | `PETROLIMEX_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `15:20`, `17:15` & `03:15` ngày 01 |
 | **Gas** | `SAIGONPETRO_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | Cùng lịch Gas |
 | **Gas** | `PVGAS_LPG` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Cùng lịch Gas |
 | **Gas** | `VIETNAMBIZ_GAS_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` (2 bước) | Cùng lịch Gas |
+
+*(Trên Docker Compose local, `vxg_worker` chạy đầy đủ bộ 10 job APScheduler chi tiết hơn theo ngày trong tuần/giờ Việt Nam.)*
 
 ---
 
@@ -78,13 +86,11 @@ flowchart LR
 | `GET /api/v1/audit/runs/{run_id}` | Công khai | Log chi tiết từng nguồn (`crawl_source_logs`) trong một phiên cào |
 | `GET /api/v1/sources/health` | Công khai | Tỷ lệ thành công 7 ngày, độ trễ trung bình và trạng thái hiện tại của 11 nguồn active |
 | `GET /api/v1/audit/anomalies` | Công khai | Danh sách cảnh báo `anomaly_alerts` (`OPEN` / `ACKNOWLEDGED` / `RESOLVED`) |
-| `POST /api/v1/admin/crawl-runs` | `X-Admin-API-Key` | Đẩy job (`ALL`/`GOLD`/`FUEL`/`GAS`) vào hàng đợi PostgreSQL (`202` / `409 Conflict` chống spam) |
+| `POST /api/v1/admin/crawl-runs` | `X-Admin-API-Key` | Tạo job `QUEUED` (`202` / `409 Conflict` / `502` nếu dispatch GitHub lỗi) |
 
 ---
 
 ## Chạy nhanh trên Local (Docker Compose)
-
-Yêu cầu: Docker Desktop (Docker Compose v2+).
 
 1. **Tạo file biến môi trường `.env` từ [`.env.example`](.env.example):**
    - **Windows PowerShell:**
@@ -95,56 +101,41 @@ Yêu cầu: Docker Desktop (Docker Compose v2+).
      ```bash
      cp .env.example .env
      ```
-2. **Khởi chạy toàn bộ 5 dịch vụ (`postgres`, `migrator`, `api`, `worker`, `web`):**
+2. **Khởi chạy toàn bộ 5 dịch vụ local (`postgres`, `migrator`, `api`, `worker`, `web`):**
    ```bash
    docker compose up --build -d
    ```
-3. **Nạp dữ liệu giá thực tế ngay lần đầu (không cần chờ tới khung giờ cron):**
+3. **Nạp dữ liệu giá thực tế ngay lần đầu (không cần chờ khung giờ cron):**
    ```bash
    docker compose exec worker python -m vxg_worker.cli run --scope ALL
    ```
-   *(Hoặc vào trang `http://localhost:3000/audit`, bấm **Chạy cào thủ công** và nhập khóa mặc định local `change-me-local-admin-key` từ `.env.example`.)*
-4. **Truy cập các dịch vụ local:**
+   *(Hoặc vào `http://localhost:3000/audit`, bấm **Chạy cào thủ công** và nhập khóa mặc định local `change-me-local-admin-key`.)*
+4. **Truy cập trên trình duyệt:**
    - **Bảng giá hôm nay:** `http://localhost:3000` (hỗ trợ `?city=HN|DN|HCM`)
    - **Minh bạch & Nhật ký cào:** `http://localhost:3000/audit`
-   - **Swagger OpenAPI Docs:** `http://localhost:8000/docs`
-   - **Health / Readiness:** `http://localhost:8000/health` và `http://localhost:8000/ready`
+   - **OpenAPI / Swagger UI:** `http://localhost:8000/docs`
 
 ---
 
-## Kiểm thử & Phát triển trên Local
-
-Khi chạy công cụ lint/test trực tiếp từ Python `.venv` hoặc Node/pnpm trên máy host:
+## Kiểm thử & Phát triển
 
 ```powershell
-# Backend static checks & unit/integration tests (Windows PowerShell)
+# Backend lint, strict typecheck & unit/integration tests (Windows PowerShell)
 .\.venv\Scripts\ruff.exe check packages apps/api apps/worker tests
 .\.venv\Scripts\mypy.exe packages/shared-py/src apps/api/src apps/worker/src tests
 .\.venv\Scripts\pytest.exe tests/unit -v
-.\.venv\Scripts\pytest.exe tests/integration -v   # cần PostgreSQL đang chạy trên localhost:5432
+.\.venv\Scripts\pytest.exe tests/integration -v
 
-# Frontend static checks & production build
+# Frontend lint, typecheck & build
 pnpm --dir apps/web lint
 pnpm --dir apps/web typecheck
 pnpm --dir apps/web build
 ```
 
-Hoặc sử dụng các target tiện ích trong [`Makefile`](Makefile) (macOS / Linux / WSL):
-
-| Lệnh `Makefile` | Tác dụng |
-| :--- | :--- |
-| `make up` / `make down` | Khởi chạy hoặc tắt toàn bộ Docker Compose stack |
-| `make migrate` / `make seed` | Chạy Alembic migration & seed danh mục chuẩn hóa (idempotent) |
-| `make test` | Chạy offline unit tests (`tests/unit`, gồm Golden Fixtures, Guardrails & Production Hardening) |
-| `make test-integration` | Chạy integration tests với PostgreSQL thật (`tests/integration`) |
-| `make lint` | Chạy `ruff check` và `mypy` strict trên toàn bộ Python codebase |
-| `make web-build` | Chạy `eslint`, `tsc --noEmit` và `next build` cho `apps/web` |
-| `make prune-snapshots` | Chạy dọn `raw_evidence_snapshots` quá hạn lưu trữ (`SNAPSHOT_RETENTION_DAYS`) |
+Hoặc sử dụng [`Makefile`](Makefile): `make up`, `make down`, `make test`, `make test-integration`, `make lint`, `make web-build`, `make prune-snapshots`.
 
 ---
 
-## Bảo mật & Triển khai Production
+## Triển khai 100% Miễn phí lên Cloud
 
-- `.env` được loại trừ trong [`.gitignore`](.gitignore) — **tuyệt đối không** commit secret hoặc đặt `ADMIN_API_KEY` vào biến `NEXT_PUBLIC_*` trên Vercel.
-- Khi thiết lập `APP_ENV=production`, `vxg-api` sẽ từ chối khởi động nếu `ADMIN_API_KEY` rỗng, giữ giá trị mặc định hoặc ngắn hơn 24 ký tự.
-- Xem hướng dẫn từng bước cấu hình GitHub Actions, Railway (Singapore) cho PostgreSQL + `vxg-api` + `vxg-worker`, Vercel cho `apps/web`, Telegram/Discord alerting và backup/khôi phục dữ liệu tại [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+Xem hướng dẫn chi tiết từng bước cài đặt **Neon (PostgreSQL) + GitHub Actions (Worker) + Render Free (FastAPI) + Vercel Hobby (Next.js) + cron-job.org** tại [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).

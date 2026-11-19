@@ -1,129 +1,123 @@
-# Hướng dẫn Triển khai & Vận hành Production (`vxg-tracker`)
+# Hướng dẫn Triển khai Production 100% Miễn phí (`vxg-tracker`)
 
-Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1** của **VXG Tracker** theo kiến trúc **Phương án A**:
-- **Frontend (`apps/web`):** Vercel (region `sin1` Singapore).
-- **Backend API (`apps/api`), Worker (`apps/worker`) & Managed PostgreSQL 16:** Railway (region Singapore).
-- **CI/CD:** GitHub Actions ([.github/workflows/ci.yml](../.github/workflows/ci.yml)).
+Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1** của **VXG Tracker** trên hạ tầng **100% miễn phí chuẩn Production** (khu vực Singapore):
+
+- **Database:** **Neon** Serverless PostgreSQL 16 (Singapore)
+- **Scraper Worker & Scheduler:** **GitHub Actions** ([`crawl-schedule.yml`](../.github/workflows/crawl-schedule.yml) — Ubuntu `7GB RAM`, chạy Playwright Chromium)
+- **REST & Audit API (`apps/api`):** **Render Free** Web Service (Singapore, dùng [`render.yaml`](../render.yaml))
+- **Frontend (`apps/web`):** **Vercel Hobby** (region `sin1` Singapore, dùng [`apps/web/vercel.json`](../apps/web/vercel.json))
 
 ---
 
-## 1. Khởi tạo Repository GitHub & CI/CD
+## Bước 1. Tạo PostgreSQL 16 miễn phí trên Neon (Singapore)
+
+1. Đăng ký / đăng nhập tài khoản tại Neon -> **New Project**.
+2. Chọn **Postgres version: `16`** và **Region: `AWS Asia Pacific (Singapore)` (`aws-ap-southeast-1`)**.
+3. Trong màn hình **Connection Details**, sao chép chuỗi kết nối (thường có dạng):
+   ```text
+   postgresql://neondb_owner:...@ep-xxx-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+   ```
+   - **Tương thích tự động:** `vxg_shared.settings` tự động chuyển `sslmode=require` sang `ssl=require` và loại bỏ `channel_binding` cho driver bất đồng bộ `asyncpg`, đồng thời giữ nguyên tham số SSL cho Alembic/`psycopg`, kèm `pool_pre_ping=True` và `pool_recycle=300` để tự phục hồi khi Neon wake up sau auto-suspend.
+   - *(Tùy chọn)* Nếu bạn dùng URL **Pooled (`-pooler`)** cho `DATABASE_URL`, bạn có thể copy thêm URL **Direct** (không có `-pooler`) vào biến `DATABASE_URL_DIRECT` để Alembic chạy migration trực tiếp ổn định hơn.
+
+---
+
+## Bước 2. Đẩy mã nguồn lên GitHub, cấu hình Secrets & Fine-grained PAT
 
 1. Tạo repository mới trên GitHub (ví dụ `vxg-tracker`) và push nhánh `main`.
-   - **Kiểm tra an toàn trước khi push:** Đảm bảo `.env` không bao giờ được commit (đã được chặn sẵn trong `.gitignore`). Chỉ commit `.env.example`.
-2. GitHub Actions workflow `.github/workflows/ci.yml` sẽ tự động chạy 4 job trên mọi `push` và `pull_request` tới `main`:
-   - `backend-quality-and-unit`: Kiểm tra `ruff`, `mypy` strict và chạy `pytest tests/unit` (toàn bộ Golden Fixtures offline).
-   - `backend-integration-postgres`: Dựng `postgres:16-alpine`, chạy `alembic upgrade head`, chạy `seed.py` 2 lần để kiểm chứng idempotency, và chạy `pytest tests/integration`.
-   - `frontend-ci`: Chạy `pnpm lint`, `pnpm typecheck`, `pnpm build` và quét bảo mật thư mục `.next/static`.
-   - `docker-build-verify`: Build thử cả 3 Dockerfile (`api`, `worker`, `web`) khi 3 job trên đạt.
+   - Đảm bảo file `.env` cục bộ **không bao giờ** bị push (đã được chặn sẵn trong `.gitignore`).
+2. Vào **GitHub Repo -> Settings -> Secrets and variables -> Actions -> New repository secret**, thêm:
+   - `DATABASE_URL` *(Bắt buộc)*: Dán chuỗi kết nối PostgreSQL của **Neon** ở Bước 1.
+   - `ALERT_TELEGRAM_BOT_TOKEN` *(Tùy chọn)*: Bot token nhận cảnh báo lỗi nguồn/dữ liệu bất thường.
+   - `ALERT_TELEGRAM_CHAT_ID` *(Tùy chọn)*: Group/Chat ID nhận tin Telegram.
+   - `ALERT_DISCORD_WEBHOOK_URL` *(Tùy chọn)*: URL Discord Webhook nếu dùng Discord.
+3. Tạo **Fine-grained Personal Access Token** (`GITHUB_DISPATCH_TOKEN`) để nút **"Chạy cào thủ công"** trên `/audit` kích hoạt được GitHub Actions:
+   - Vào **GitHub Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens -> Generate new token**.
+   - **Repository access:** Chọn *Only select repositories* -> chọn repo `vxg-tracker`.
+   - **Repository permissions:** Chỉ cấp **`Actions: Read and write`** (tối thiểu đặc quyền, không cấp quyền `Contents`/`Secrets` nếu không cần).
+   - Sao chép token này để điền cho service `vxg-api` trên Render ở Bước 3.
+
+### Lịch chạy tự động trên GitHub Actions (`.github/workflows/crawl-schedule.yml`)
+
+| Giờ UTC (Cron) | Giờ Việt Nam (`UTC+7`) | Phạm vi thực thi | Mục đích |
+| :--- | :--- | :--- | :--- |
+| `45 1 * * *` | `08:45` hằng ngày | `GOLD` | Mở phiên giá vàng sáng |
+| `30 4 * * *` | `11:30` hằng ngày | `GOLD` | Cập nhật giá vàng trưa |
+| `20 8 * * *` | `15:20` hằng ngày | `ALL` | Giá vàng chiều + bắt kỳ điều hành xăng dầu `15:00` Thứ Năm |
+| `15 10 * * *` | `17:15` hằng ngày | `ALL` | Chốt phiên cuối ngày cho cả Vàng, Xăng dầu, Gas |
+| `15 20 * * *` | `03:15` hằng ngày | `prune-snapshots` (+ `GAS` mùng 1) | Dọn snapshot quá 90 ngày + quét giá Gas ngày 01 đầu tháng |
+
+*(Ước tính tổng thời gian chạy ~150–250 phút/tháng trên `ubuntu-latest`, nằm gọn trong hạn mức **2.000 phút/tháng miễn phí** của GitHub Actions cho private repo hoặc không giới hạn với public repo.)*
 
 ---
 
-## 2. Triển khai Backend & PostgreSQL trên Railway (Region Singapore)
+## Bước 3. Triển khai `vxg-api` lên Render Free (Singapore)
 
-### Bước 2.1. Tạo Project & Managed PostgreSQL 16
-1. Đăng nhập Railway -> **New Project** -> **Provision PostgreSQL** (chọn region **Southeast Asia / Singapore**).
-2. Trong service PostgreSQL -> tab **Variables**, ghi nhận biến `DATABASE_URL` nội bộ dạng `postgresql://postgres:...@postgres.railway.internal:5432/railway` (hoặc dùng reference `${{Postgres.DATABASE_URL}}` từ các service khác).
-   - *Lưu ý:* `vxg_shared.settings.SharedSettings` tự động chuẩn hóa scheme `postgres://` / `postgresql://` sang `postgresql+asyncpg://` (cho runtime async) và `postgresql+psycopg://` (cho Alembic migrations).
+1. Sinh khóa quản trị `ADMIN_API_KEY` mạnh (>= 24 ký tự; `vxg-api` ở chế độ `APP_ENV=production` sẽ từ chối khởi động nếu dùng key yếu hoặc mặc định):
+   ```bash
+   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+2. Đăng nhập **Render** -> **New -> Blueprint** (hoặc **New -> Web Service** chọn **Docker**):
+   - Nếu dùng **Blueprint**, Render sẽ tự đọc [`render.yaml`](../render.yaml) ở thư mục gốc (`plan: free`, `region: singapore`, Dockerfile `./apps/api/Dockerfile`, `healthCheckPath: /health`).
+   - Khi khởi động, [`apps/api/entrypoint.sh`](../apps/api/entrypoint.sh) thấy `RUN_MIGRATIONS_ON_START=true` sẽ tự động chạy `alembic upgrade head` và `python -m vxg_shared.db.seed` (idempotent) trước khi mở cổng `$PORT`.
+3. Điền đầy đủ **Environment Variables** trên Render cho `vxg-api`:
 
-### Bước 2.2. Tạo khóa bảo mật `ADMIN_API_KEY` mạnh
-Khi chạy với `APP_ENV=production`, `vxg-api` sẽ **từ chối khởi động (fail-fast)** nếu `ADMIN_API_KEY` để mặc định (`change-me-local-admin-key`), rỗng, hoặc ngắn hơn 24 ký tự. Sinh khóa ngẫu nhiên tối thiểu 32 byte:
-```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-### Bước 2.3. Deploy Service `vxg-api`
-1. Trong cùng Railway Project -> **New** -> **GitHub Repo** -> chọn repo `vxg-tracker`.
-2. Vào **Settings** của service:
-   - Đặt tên service: `vxg-api`.
-   - Chọn **Region**: **Singapore**.
-   - **Config as Code (Config File Path):** `apps/api/railway.json` *(file này đã cấu hình sẵn `apps/api/Dockerfile`, `preDeployCommand` chạy `alembic upgrade head && python -m vxg_shared.db.seed`, `$PORT`, và healthcheck `/ready`)*.
-3. Trong tab **Variables** của `vxg-api`, thiết lập:
-
-| Biến môi trường | Giá trị mẫu / Tham chiếu | Bắt buộc | Ghi chú |
+| Biến môi trường | Giá trị | Bắt buộc | Ghi chú |
 | :--- | :--- | :---: | :--- |
-| `APP_ENV` | `production` | Bắt buộc | Kích hoạt khóa kiểm tra `ADMIN_API_KEY` nghiêm ngặt |
-| `TZ` | `Asia/Ho_Chi_Minh` | Bắt buộc | Khóa cứng múi giờ UTC+7 |
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` | Bắt buộc | Dùng private network URL của Railway Postgres |
-| `CORS_ORIGINS` | `https://<domain-vercel-cua-ban>` | Bắt buộc | Nhiều origin phân cách bằng dấu `,` |
-| `ADMIN_API_KEY` | `<chuỗi ngẫu nhiên >= 32 ký tự>` | Bắt buộc | Dùng để mở khóa nút "Chạy cào thủ công" trên `/audit` |
+| `APP_ENV` | `production` | Bắt buộc | Bật Production Hardening kiểm tra `ADMIN_API_KEY` & GitHub config |
+| `TZ` | `Asia/Ho_Chi_Minh` | Bắt buộc | Khóa chuẩn múi giờ UTC+7 |
+| `RUN_MIGRATIONS_ON_START` | `true` | Bắt buộc | Tự chạy Alembic migration + seed khi Render khởi động container |
+| `DATABASE_URL` | `<Neon Postgres URL>` | Bắt buộc | Chuỗi kết nối Neon ở Bước 1 |
+| `DATABASE_URL_DIRECT` | `<Neon Direct URL>` | Khuyên dùng | Bỏ trống sẽ fallback về `DATABASE_URL` |
+| `ADMIN_API_KEY` | `<khóa >= 32 ký tự vừa sinh>` | Bắt buộc | Bảo vệ endpoint `POST /api/v1/admin/crawl-runs` |
+| `CORS_ORIGINS` | `https://<domain-vercel-cua-ban>` | Bắt buộc | Cập nhật ngay sau Bước 4 (không có dấu `/` cuối) |
+| `WORKER_DISPATCH_MODE` | `github_actions` | Bắt buộc | Chuyển nút chạy cào thủ công sang dispatch GitHub Actions |
+| `GITHUB_REPO` | `<username>/vxg-tracker` | Bắt buộc | Repository chứa `.github/workflows/crawl-schedule.yml` |
+| `GITHUB_WORKFLOW_FILE` | `crawl-schedule.yml` | Mặc định | Tên file workflow trong `.github/workflows/` |
+| `GITHUB_WORKFLOW_REF` | `main` | Mặc định | Nhánh mặc định để kích hoạt workflow |
+| `GITHUB_DISPATCH_TOKEN` | `<Fine-grained PAT ở Bước 2>` | Bắt buộc | Quyền `Actions: Read and write` |
 
-4. Vào **Settings -> Networking -> Generate Domain** để lấy public domain cho API (ví dụ `https://vxg-api-production.up.railway.app`) và kiểm tra `GET https://<domain>/ready` trả về `{"status":"ready","database":"connected"}`.
-
-### Bước 2.4. Deploy Service `vxg-worker`
-1. Trong cùng Railway Project -> **New** -> **GitHub Repo** -> chọn lại repo `vxg-tracker`.
-2. Vào **Settings** của service:
-   - Đặt tên service: `vxg-worker`.
-   - Chọn **Region**: **Singapore**.
-   - **Config File Path:** `apps/worker/railway.json` *(dùng `apps/worker/Dockerfile` đã cài sẵn Playwright Chromium)*.
-   - **Memory limit:** Nên đảm bảo gói từ **1 GB RAM** trở lên để Playwright headless render DOJI/PNJ/Petrolimex không bị OOM.
-   - Không cần Generate Public Domain (worker là daemon nền chỉ kết nối PostgreSQL qua internal network).
-3. Trong tab **Variables** của `vxg-worker`, thiết lập:
-
-| Biến môi trường | Giá trị mẫu / Tham chiếu | Bắt buộc | Ghi chú |
-| :--- | :--- | :---: | :--- |
-| `APP_ENV` | `production` | Bắt buộc | Đồng bộ môi trường production |
-| `TZ` | `Asia/Ho_Chi_Minh` | Bắt buộc | Khóa lịch cron APScheduler (10 jobs UTC+7) |
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` | Bắt buộc | Trỏ cùng PostgreSQL với `vxg-api` |
-| `WORKER_POLL_INTERVAL_SECONDS` | `5` | Tùy chọn | Chu kỳ đọc hàng đợi `QUEUED` trong `crawl_runs` |
-| `PRICE_SPIKE_THRESHOLD_PCT` | `15.0` | Tùy chọn | Ngưỡng chặn giá biến động bất thường (%) |
-| `SNAPSHOT_RETENTION_DAYS` | `90` | Tùy chọn | Số ngày lưu payload gzip trước khi tự động dọn |
-| `ALERT_TELEGRAM_BOT_TOKEN` | `<bot_token>` | Tùy chọn | Token Telegram Bot nhận cảnh báo lỗi nguồn |
-| `ALERT_TELEGRAM_CHAT_ID` | `<chat_id>` | Tùy chọn | Chat/Group ID nhận thông báo Telegram |
-| `ALERT_DISCORD_WEBHOOK_URL` | `https://discord.com/api/webhooks/...` | Tùy chọn | Webhook kênh Discord vận hành |
-| `SCRAPER_HTTP_PROXY` | `` | Tùy chọn | HTTP/SOCKS proxy nếu cần khi nguồn siết IP |
-
-4. Sau khi `vxg-worker` chạy ổn định, mở trang `/audit` trên giao diện hoặc gọi `POST https://<api-domain>/api/v1/admin/crawl-runs` với `X-Admin-API-Key` để chạy phiên cào `ALL` đầu tiên làm đầy dữ liệu thật.
+4. Sau khi deploy xong, mở `https://<ten-app>.onrender.com/ready` để xác nhận `{"status":"ready","database":"connected"}`.
+5. Vào tab **Actions** trên GitHub -> **Crawl Schedule & On-Demand Worker -> Run workflow (`scope: ALL`)** để nạp bộ dữ liệu thật đầu tiên vào Neon.
 
 ---
 
-## 3. Triển khai Frontend (`apps/web`) trên Vercel
+## Bước 4. Triển khai Frontend (`apps/web`) lên Vercel Hobby
 
-1. Truy cập Vercel -> **Add New... -> Project** -> Import repo GitHub `vxg-tracker`.
+1. Truy cập **Vercel -> Add New... -> Project** -> Import repo GitHub `vxg-tracker`.
 2. Trong phần **Configure Project**:
    - **Framework Preset:** `Next.js`
-   - **Root Directory:** **`apps/web`** *(bắt buộc chỉnh đúng thư mục này cho Monorepo)*
-   - Vercel sẽ tự động đọc `apps/web/vercel.json` (region `sin1` Singapore, `pnpm install --frozen-lockfile`, và các HTTP security headers).
-3. Trong **Environment Variables** trên Vercel (cho cả `Production` và `Preview`):
-   - `INTERNAL_API_URL` = `https://<domain-railway-api>` *(dùng cho Server-Side Rendering)*
-   - `NEXT_PUBLIC_API_URL` = `https://<domain-railway-api>` *(dùng cho Client Components như Evidence Drawer, đổi thành phố, trang `/audit`)*
-   - **TUYỆT ĐỐI KHÔNG** thêm `ADMIN_API_KEY` vào Vercel Environment Variables. Admin sẽ nhập trực tiếp khóa trên hộp thoại giao diện `/audit` (chỉ lưu tạm trong `sessionStorage` của trình duyệt).
-4. Bấm **Deploy**. Sau khi có domain Vercel (ví dụ `https://vxg-tracker.vercel.app`), quay lại cập nhật biến `CORS_ORIGINS` trên Railway `vxg-api` khớp chính xác với origin đó (không có dấu `/` ở cuối).
+   - **Root Directory:** **`apps/web`** *(bắt buộc trỏ vào thư mục này của Monorepo)*
+   - Vercel tự áp dụng [`apps/web/vercel.json`](../apps/web/vercel.json) (region `sin1` Singapore + security headers).
+3. Trong **Environment Variables** của Vercel:
+   - `INTERNAL_API_URL` = `https://<ten-app>.onrender.com`
+   - `NEXT_PUBLIC_API_URL` = `https://<ten-app>.onrender.com`
+   - **TUYỆT ĐỐI KHÔNG** đưa `ADMIN_API_KEY` hay `GITHUB_DISPATCH_TOKEN` lên Vercel.
+4. Bấm **Deploy**. Khi có URL chính thức (ví dụ `https://vxg-tracker.vercel.app`), quay lại Render cập nhật `CORS_ORIGINS=https://vxg-tracker.vercel.app`.
 
 ---
 
-## 4. Thiết lập Cảnh báo Tự động (Telegram / Discord)
+## Bước 5. Mẹo giữ Render Free luôn thức bằng `cron-job.org` (Miễn phí)
 
-`AlertNotifier` trong `vxg-worker` tự động gửi cảnh báo ngay sau khi kết thúc phiên cào nếu xảy ra một trong các sự kiện sau:
-- Toàn phiên có trạng thái `FAILED`.
-- Có nguồn gặp `SCHEMA_DRIFT` (web nguồn đổi cấu trúc DOM) hoặc `BLOCKED` / `HTTP 403`.
-- Có bản ghi giá bị Guardrails chặn (`FLAGGED`) hoặc kích hoạt `AnomalyAlert` (ví dụ `SOURCE_DOWN_3X`).
+Render Free Web Service sẽ tự ngủ (*spin down*) sau **15 phút** không có HTTP traffic, khiến request đầu tiên mất ~25–45 giây khởi động lại (*cold start*). Dù Frontend đã cấu hình timeout 55 giây để chịu cold start mượt mà, bạn có thể giữ API phản hồi tức thì `24/7`:
 
-**Cấu hình nhanh:**
-- **Telegram:** Tạo bot với `@BotFather` lấy `ALERT_TELEGRAM_BOT_TOKEN`, thêm bot vào nhóm cảnh báo và lấy `ALERT_TELEGRAM_CHAT_ID`.
-- **Discord:** Mở *Server Settings -> Integrations -> Webhooks -> New Webhook*, copy URL dán vào `ALERT_DISCORD_WEBHOOK_URL`.
-- Nếu cả 2 kênh đều để trống (như môi trường local), Worker sẽ log ở mức `INFO` và bỏ qua an toàn, không ảnh hưởng quá trình cào giá.
+1. Tạo tài khoản miễn phí tại `https://cron-job.org`.
+2. Chọn **Create cronjob**:
+   - **URL:** `https://<ten-app>.onrender.com/health`
+   - **Execution schedule:** **Every 14 minutes** (`*/14 * * * *`)
+   - **Request method:** `GET`
+3. Lưu và bật job — `vxg-api` sẽ luôn giữ trạng thái nóng mà không tốn thêm chi phí (vẫn giữ hạn mức free giờ chạy của Render).
 
 ---
 
-## 5. Vận hành Dữ liệu, Snapshot Retention & Backup PostgreSQL
+## Bước 6. Cảnh báo lỗi & Sao lưu Neon PostgreSQL
 
-### Dọn dẹp `raw_evidence_snapshots`
-- Mặc định Worker tự động chạy job `snapshot_retention_0315` vào **03:15 sáng hằng ngày (`Asia/Ho_Chi_Minh`)** để xóa các bản nén gzip cũ hơn `SNAPSHOT_RETENTION_DAYS` (90 ngày).
-- **Bảo toàn toàn vẹn dữ liệu:** Mọi bản ghi trong `price_records`, `crawl_runs`, `crawl_source_logs`, `anomaly_alerts` **không bao giờ bị xóa**; đồng thời SHA-256 bằng chứng đang gắn với mức giá `VERIFIED` mới nhất của từng mặt hàng/khu vực luôn được giữ lại vĩnh viễn.
-- Chạy thủ công khi cần:
+- **Cảnh báo Telegram / Discord:** Chỉ cần điền `ALERT_TELEGRAM_BOT_TOKEN` + `ALERT_TELEGRAM_CHAT_ID` và/hoặc `ALERT_DISCORD_WEBHOOK_URL` trong GitHub Actions Secrets. Khi có phiên `FAILED`, nguồn gặp `SCHEMA_DRIFT`/`HTTP 403` hoặc có bản ghi `FLAGGED`, worker sẽ tự gửi thông báo theo giờ `UTC+7`.
+- **Sao lưu thủ công từ máy cá nhân:**
   ```bash
-  docker compose exec worker python -m vxg_worker.cli prune-snapshots --retention-days 90
+  pg_dump "<NEON_DIRECT_DATABASE_URL>" --format=custom --no-owner --file="vxg_neon_$(date +%Y%m%d_%H%M).dump"
   ```
-
-### Backup & Khôi phục PostgreSQL
-1. **Railway Managed Backups:** Bật Automated Daily Backups trong tab **Backups** của service PostgreSQL trên Railway.
-2. **Sao lưu thủ công (`pg_dump`) từ local hoặc Railway CLI:**
-   ```bash
-   pg_dump "$DATABASE_URL_PUBLIC" --format=custom --no-owner --file="vxg_backup_$(date +%Y%m%d_%H%M).dump"
-   ```
-3. **Khôi phục (`pg_restore`):**
-   ```bash
-   pg_restore --dbname="$DATABASE_URL_PUBLIC" --clean --if-exists --no-owner "vxg_backup_YYYYMMDD_HHMM.dump"
-   ```
-
+- **Khôi phục (`pg_restore`):**
+  ```bash
+  pg_restore --dbname="<NEON_DIRECT_DATABASE_URL>" --clean --if-exists --no-owner "vxg_neon_YYYYMMDD_HHMM.dump"
+  ```

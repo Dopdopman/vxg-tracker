@@ -45,16 +45,33 @@ export function getApiBaseUrl(): string {
   return raw.replace(/\/+$/, "");
 }
 
+const DEFAULT_API_TIMEOUT_MS = 55_000;
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${getApiBaseUrl()}${path}`;
-  const response = await fetch(url, {
-    ...init,
-    cache: "no-store",
-    headers: {
-      Accept: "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      cache: "no-store",
+      signal: init?.signal ?? AbortSignal.timeout(DEFAULT_API_TIMEOUT_MS),
+      headers: {
+        Accept: "application/json",
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (err: unknown) {
+    const isTimeout =
+      err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    throw new ApiError(
+      503,
+      isTimeout ? "API_COLD_START_TIMEOUT" : "API_NETWORK_ERROR",
+      isTimeout
+        ? "Máy chủ API mất quá lâu để phản hồi (có thể đang thức dậy từ trạng thái nghỉ trên Render Free ~25–45s). Vui lòng thử lại."
+        : "Không thể kết nối tới máy chủ API. Nếu dùng Render Free, hệ thống có thể đang khởi động lại (vui lòng đợi 25–45s rồi thử lại).",
+      null
+    );
+  }
 
   if (!response.ok) {
     let parsed: Partial<ErrorResponse> | null = null;

@@ -7,9 +7,13 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import delete, func, select, update
 
+from vxg_api.config import ApiSettings
+from vxg_api.errors import AppError
+from vxg_api.services.admin_service import trigger_crawl_run
 from vxg_shared.db.engine import create_async_db_engine, create_session_factory
 from vxg_shared.db.models import (
     AnomalyAlert,
@@ -479,4 +483,170 @@ async def test_snapshot_retention_prunes_expired_unprotected_only() -> None:
                 )
             await cleanup.commit()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_github_dispatch_failure_marks_failed_and_cli_run_id_executes_queued() -> None:
+    engine = create_async_db_engine(_HOST_TEST_DB_URL)
+    session_factory = create_session_factory(engine)
+    created_run_ids: list[uuid.UUID] = []
+    created_shas: list[str] = []
+    original_source_state: dict[int, tuple[Any, int]] = {}
+
+    gh_settings = ApiSettings.model_validate(
+        {
+            "APP_ENV": "production",
+            "DATABASE_URL": _HOST_TEST_DB_URL,
+            "DATABASE_URL_SYNC": None,
+            "ADMIN_API_KEY": "vxg_prod_9f8e7d6c5b4a3210fedcba987654",
+            "WORKER_DISPATCH_MODE": "github_actions",
+            "GITHUB_REPO": "acme/vxg-tracker",
+            "GITHUB_WORKFLOW_FILE": "crawl-schedule.yml",
+            "GITHUB_WORKFLOW_REF": "main",
+            "GITHUB_DISPATCH_TOKEN": "ghp_test_token",
+        }
+    )
+
+    try:
+        async with session_factory() as session:
+            gold_sources = list(
+                (
+                    await session.execute(
+                        select(Source).where(Source.category == "GOLD", Source.is_active.is_(True))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            original_source_state = {
+                s.id: (s.last_success_at, s.consecutive_failures) for s in gold_sources
+            }
+            sjc_source = next(s for s in gold_sources if s.code == "SJC_OFFICIAL_XML")
+            sjc_comm_id = (
+                await session.execute(select(Commodity.id).where(Commodity.code == "GOLD_SJC_BAR_SJC"))
+            ).scalar_one()
+            hcm_loc_id = (
+                await session.execute(select(Location.id).where(Location.code == "HCM"))
+            ).scalar_one()
+            existing_latest = await get_latest_verified_price(
+                session, commodity_id=sjc_comm_id, location_id=hcm_loc_id
+            )
+            base_buy = (
+                (existing_latest.buy_price_vnd + 10_000)
+                if existing_latest and existing_latest.buy_price_vnd
+                else 133_700_000
+            )
+            base_sell = (
+                (existing_latest.sell_price_vnd + 10_000)
+                if existing_latest and existing_latest.sell_price_vnd
+                else 136_700_000
+            )
+
+        # Hold worker default lock so live vxg_worker defers QUEUED test rows until cleanup.
+        async with PostgresAdvisoryLock(engine, 908_712_001) as guard_acquired:
+            assert guard_acquired is True
+
+            # 1. Dispatch failure (HTTP 500) MUST mark CrawlRun FAILED (zero stuck QUEUED jobs)
+            async with (
+                httpx.AsyncClient(
+                    transport=httpx.MockTransport(
+                        lambda _req: httpx.Response(500, text="GitHub down")
+                    )
+                ) as fail_client,
+                session_factory() as session,
+            ):
+                with pytest.raises(AppError) as err_info:
+                    await trigger_crawl_run(
+                        session,
+                        scope=CrawlScope.GOLD,
+                        settings=gh_settings,
+                        http_client=fail_client,
+                    )
+                assert err_info.value.status_code == 502
+                assert err_info.value.code == "GITHUB_DISPATCH_FAILED"
+                assert isinstance(err_info.value.details, dict)
+                failed_run_id = uuid.UUID(str(err_info.value.details["run_id"]))
+                created_run_ids.append(failed_run_id)
+
+            async with session_factory() as verify_session:
+                failed_row = await verify_session.get(CrawlRun, failed_run_id)
+                assert failed_row is not None
+                assert failed_row.status == CrawlRunStatus.FAILED.value
+                assert failed_row.error_summary is not None
+                assert "HTTP 500" in failed_row.error_summary
+
+            # 2. Successful dispatch (HTTP 204) creates QUEUED run; runner executes exact --run-id
+            async with (
+                httpx.AsyncClient(
+                    transport=httpx.MockTransport(lambda _req: httpx.Response(204))
+                ) as ok_client,
+                session_factory() as session,
+            ):
+                dispatched = await trigger_crawl_run(
+                    session,
+                    scope=CrawlScope.GOLD,
+                    settings=gh_settings,
+                    http_client=ok_client,
+                )
+                assert dispatched.status == CrawlRunStatus.QUEUED
+                created_run_ids.append(dispatched.run_id)
+
+            valid_xml = b'<?xml version="1.0"?><root><ratelist id="run-id-test"/></root>'
+            created_shas.append(compute_content_sha256(valid_xml))
+            reg = AdapterRegistry()
+            reg.register(_SyntheticGoldAdapter(sjc_source.parser_key, "valid", base_buy, base_sell))
+            worker_settings = WorkerSettings.model_validate(
+                {
+                    "DATABASE_URL": _HOST_TEST_DB_URL,
+                    "DATABASE_URL_SYNC": None,
+                    "advisory_lock_key": 908_712_996,
+                }
+            )
+            runner = CrawlRunner(
+                engine=engine,
+                session_factory=session_factory,
+                settings=worker_settings,
+                adapter_registry=reg,
+                fetcher=_StubTwoTierFetcher({"SJC_OFFICIAL_XML": valid_xml}),
+            )
+            run_summary = await runner.execute_run(
+                scope=CrawlScope.GOLD,
+                trigger_type=TriggerType.MANUAL_ADMIN,
+                existing_run_id=dispatched.run_id,
+            )
+            assert run_summary.run_id == dispatched.run_id
+            assert run_summary.status == CrawlRunStatus.COMPLETED.value
+            assert run_summary.records_verified_count == 1
+    finally:
+        async with session_factory() as cleanup:
+            if created_run_ids:
+                await cleanup.execute(
+                    delete(AnomalyAlert).where(AnomalyAlert.crawl_run_id.in_(created_run_ids))
+                )
+                await cleanup.execute(
+                    delete(PriceRecord).where(PriceRecord.crawl_run_id.in_(created_run_ids))
+                )
+                await cleanup.execute(
+                    delete(CrawlSourceLog).where(CrawlSourceLog.crawl_run_id.in_(created_run_ids))
+                )
+                await cleanup.execute(delete(CrawlRun).where(CrawlRun.id.in_(created_run_ids)))
+            if created_shas:
+                await cleanup.execute(
+                    delete(RawEvidenceSnapshot).where(
+                        RawEvidenceSnapshot.content_sha256.in_(created_shas)
+                    )
+                )
+            stub_sha = compute_content_sha256(b"<html><title>Stub</title><body>ok</body></html>")
+            await cleanup.execute(
+                delete(RawEvidenceSnapshot).where(RawEvidenceSnapshot.content_sha256 == stub_sha)
+            )
+            for src_id, (prev_last, prev_fail) in original_source_state.items():
+                await cleanup.execute(
+                    update(Source)
+                    .where(Source.id == src_id)
+                    .values(last_success_at=prev_last, consecutive_failures=prev_fail)
+                )
+            await cleanup.commit()
+        await engine.dispose()
+
 

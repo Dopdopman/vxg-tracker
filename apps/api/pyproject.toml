@@ -9,6 +9,7 @@ description = "FastAPI read and audit API server for vxg-tracker"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
+    "httpx>=0.28.0",
     "uvicorn[standard]>=0.32.0",
     "vxg-shared",
 ]

@@ -1,17 +1,25 @@
-"""Admin command service to safely enqueue CrawlRun jobs without spam overlaps."""
+"""Admin command service to enqueue CrawlRun jobs and optionally dispatch GitHub Actions."""
 
 from __future__ import annotations
 
+import logging
+import time
+import uuid
+
+import httpx
 from fastapi import status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vxg_api.config import ApiSettings, WorkerDispatchMode
 from vxg_api.errors import AppError
 from vxg_api.schemas.admin import TriggerCrawlRunResponse
 from vxg_api.schemas.common import to_vn_iso
 from vxg_shared.db.models import CrawlRun
 from vxg_shared.enums import CrawlRunStatus, CrawlScope, TriggerType
 from vxg_shared.timezone import format_vn_run_code, vn_now
+
+logger = logging.getLogger("vxg_api.admin")
 
 # Distinct PG transaction-level advisory lock key to serialize admin enqueue requests.
 _ADMIN_ENQUEUE_XACT_LOCK_KEY = 908_712_002
@@ -22,18 +30,84 @@ _ACTIVE_RUN_STATUSES: tuple[str, ...] = (
 )
 
 
+class WorkflowDispatchError(Exception):
+    """Raised when dispatching a workflow_dispatch event to GitHub Actions fails."""
+
+    def __init__(self, message: str, *, upstream_status: int | None = None) -> None:
+        super().__init__(message)
+        self.upstream_status = upstream_status
+
+
 def _scopes_overlap(requested: CrawlScope, active_scope: str) -> bool:
     if requested == CrawlScope.ALL or active_scope == CrawlScope.ALL.value:
         return True
     return requested.value == active_scope
 
 
+async def dispatch_github_workflow(
+    *,
+    settings: ApiSettings,
+    run_id: uuid.UUID,
+    scope: CrawlScope,
+    http_client: httpx.AsyncClient | None = None,
+) -> None:
+    """Trigger GitHub Actions workflow_dispatch passing queued run_id and scope."""
+    repo = settings.github_repo.strip()
+    workflow_file = settings.github_workflow_file.strip() or "crawl-schedule.yml"
+    ref = settings.github_workflow_ref.strip() or "main"
+    token = settings.github_dispatch_token.strip()
+
+    if "/" not in repo or not token:
+        raise WorkflowDispatchError(
+            "Missing GITHUB_REPO ('owner/repo') or GITHUB_DISPATCH_TOKEN configuration."
+        )
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow_file}/dispatches"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "vxg-tracker-api/0.1",
+    }
+    payload = {
+        "ref": ref,
+        "inputs": {
+            "scope": scope.value,
+            "run_id": str(run_id),
+        },
+    }
+
+    async def _post(client: httpx.AsyncClient) -> None:
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            raise WorkflowDispatchError(
+                f"Network error contacting GitHub Actions API: {exc}"
+            ) from exc
+
+        if resp.status_code not in (200, 201, 202, 204):
+            detail = resp.text.strip()[:300] or f"HTTP {resp.status_code}"
+            raise WorkflowDispatchError(
+                f"GitHub Actions API returned HTTP {resp.status_code}: {detail}",
+                upstream_status=resp.status_code,
+            )
+
+    if http_client is not None:
+        await _post(http_client)
+        return
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        await _post(client)
+
+
 async def trigger_crawl_run(
     session: AsyncSession,
     *,
     scope: CrawlScope,
+    settings: ApiSettings | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> TriggerCrawlRunResponse:
-    """Enqueue a manual crawl run or reject with 409 Conflict if an overlapping run is active."""
+    """Enqueue a manual crawl run, and dispatch GitHub Actions when configured."""
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:key)"),
         {"key": _ADMIN_ENQUEUE_XACT_LOCK_KEY},
@@ -64,6 +138,7 @@ async def trigger_crawl_run(
                 },
             )
 
+    mono_start = time.monotonic()
     queued_at = vn_now()
     run = CrawlRun(
         run_code=format_vn_run_code(scope.value, dt=queued_at),
@@ -76,6 +151,45 @@ async def trigger_crawl_run(
     await session.commit()
     await session.refresh(run)
 
+    if settings is not None and settings.dispatch_mode == WorkerDispatchMode.GITHUB_ACTIONS:
+        try:
+            await dispatch_github_workflow(
+                settings=settings,
+                run_id=run.id,
+                scope=scope,
+                http_client=http_client,
+            )
+            logger.info(
+                "Dispatched GitHub Actions workflow for run_code=%s scope=%s",
+                run.run_code,
+                scope.value,
+            )
+        except WorkflowDispatchError as exc:
+            logger.error(
+                "Failed GitHub Actions dispatch for run_code=%s: %s",
+                run.run_code,
+                exc,
+            )
+            run.status = CrawlRunStatus.FAILED.value
+            run.finished_at = vn_now()
+            run.duration_ms = int((time.monotonic() - mono_start) * 1000)
+            run.error_summary = f"GitHub Actions dispatch failed: {exc}"[:2000]
+            await session.commit()
+            raise AppError(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                code="GITHUB_DISPATCH_FAILED",
+                message=(
+                    "Failed to dispatch crawl workflow to GitHub Actions; "
+                    "crawl run marked as FAILED."
+                ),
+                details={
+                    "run_id": str(run.id),
+                    "run_code": run.run_code,
+                    "upstream_status": exc.upstream_status,
+                    "reason": str(exc),
+                },
+            ) from exc
+
     return TriggerCrawlRunResponse(
         run_id=run.id,
         run_code=run.run_code,
@@ -84,4 +198,3 @@ async def trigger_crawl_run(
         status=CrawlRunStatus(run.status),
         queued_at_vn=run.started_at,
     )
-

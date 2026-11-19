@@ -35,8 +35,11 @@ COPY packages/shared-py/alembic.ini /app/packages/shared-py/alembic.ini
 COPY packages/shared-py/alembic /app/packages/shared-py/alembic
 COPY packages/shared-py/src /app/packages/shared-py/src
 COPY apps/api/src /app/apps/api/src
+COPY apps/api/entrypoint.sh /app/entrypoint.sh
 
-RUN chown -R app:app /app
+RUN sed -i 's/\r$//' /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh && \
+    chown -R app:app /app
 USER app
 
 EXPOSE 8000
@@ -44,4 +47,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)"
 
-CMD ["sh", "-c", "exec uvicorn vxg_api.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
+CMD ["/app/entrypoint.sh"]

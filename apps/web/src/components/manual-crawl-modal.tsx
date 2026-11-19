@@ -15,6 +15,7 @@ interface ManualCrawlModalProps {
 }
 
 const SESSION_KEY_STORAGE = "vxg_admin_session_key";
+const MAX_POLL_DURATION_MS = 240_000; // 4 minutes safe window covering cold start + GitHub Actions
 
 const SCOPES: readonly { code: CrawlScope; label: string; hint: string }[] = [
   { code: "ALL", label: "Tất cả (ALL)", hint: "11 nguồn Vàng, Xăng dầu, Gas" },
@@ -44,14 +45,21 @@ export function ManualCrawlModal({
   const [conflictInfo, setConflictInfo] = useState<ConflictInfo | null>(null);
   const [queuedRun, setQueuedRun] = useState<TriggerCrawlRunResponse | null>(null);
   const [liveDetail, setLiveDetail] = useState<CrawlRunDetailResponse | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
+  const pollStartedAtRef = useRef<number>(0);
+
+  const stopPolling = () => {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
 
   useEffect(() => {
     if (!open) {
-      if (pollTimerRef.current !== null) {
-        window.clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
+      stopPolling();
       return;
     }
 
@@ -65,14 +73,12 @@ export function ManualCrawlModal({
     }
     setErrorMessage(null);
     setConflictInfo(null);
+    setPollTimedOut(false);
   }, [open]);
 
   useEffect(() => {
     return () => {
-      if (pollTimerRef.current !== null) {
-        window.clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
+      stopPolling();
     };
   }, []);
 
@@ -118,16 +124,22 @@ export function ManualCrawlModal({
     }
   };
 
-  const stopPolling = () => {
-    if (pollTimerRef.current !== null) {
-      window.clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-  };
-
   const startPollingRun = (runId: string) => {
     stopPolling();
+    pollStartedAtRef.current = Date.now();
+    setElapsedSeconds(0);
+    setPollTimedOut(false);
+
     const pollOnce = async () => {
+      const elapsedMs = Date.now() - pollStartedAtRef.current;
+      setElapsedSeconds(Math.floor(elapsedMs / 1000));
+
+      if (elapsedMs >= MAX_POLL_DURATION_MS) {
+        stopPolling();
+        setPollTimedOut(true);
+        return;
+      }
+
       try {
         const detail = await fetchCrawlRunDetail(runId);
         setLiveDetail(detail);
@@ -140,9 +152,10 @@ export function ManualCrawlModal({
           onCompleted();
         }
       } catch {
-        // Keep polling on transient network blip
+        // Keep polling gracefully on transient network blip or Render wakeup
       }
     };
+
     void pollOnce();
     pollTimerRef.current = window.setInterval(() => {
       void pollOnce();
@@ -155,6 +168,8 @@ export function ManualCrawlModal({
     setConflictInfo(null);
     setQueuedRun(null);
     setLiveDetail(null);
+    setPollTimedOut(false);
+    setElapsedSeconds(0);
     stopPolling();
 
     const trimmed = adminKey.trim();
@@ -195,6 +210,10 @@ export function ManualCrawlModal({
             activeStatus:
               typeof details.active_status === "string" ? details.active_status : null,
           });
+        } else if (err.status === 502) {
+          setErrorMessage(
+            "Không thể kích hoạt GitHub Actions Worker (HTTP 502). Hệ thống đã đánh dấu phiên này là FAILED để không kẹt hàng đợi."
+          );
         } else {
           setErrorMessage(err.message);
         }
@@ -207,7 +226,24 @@ export function ManualCrawlModal({
   };
 
   const currentStatus = liveDetail?.status ?? queuedRun?.status ?? null;
-  const isTrackingActive = currentStatus === "QUEUED" || currentStatus === "RUNNING";
+  const isTrackingActive =
+    !pollTimedOut && (currentStatus === "QUEUED" || currentStatus === "RUNNING");
+
+  const statusHelperText = () => {
+    if (pollTimedOut) {
+      return "Phiên vẫn đang tiếp tục chạy nền trên Worker/GitHub Actions. Bạn có thể đóng hộp thoại và bấm Làm mới sau ít phút.";
+    }
+    if (currentStatus === "QUEUED") {
+      return `Đang chờ Worker / GitHub Actions khởi động (~15–30s)... (đã chờ ${elapsedSeconds}s)`;
+    }
+    if (currentStatus === "RUNNING") {
+      return `Worker đang thu thập & kiểm chứng dữ liệu... (đã chạy ${elapsedSeconds}s)`;
+    }
+    if (currentStatus === "FAILED") {
+      return "Phiên thu thập kết thúc với trạng thái FAILED.";
+    }
+    return "Phiên thu thập đã hoàn tất.";
+  };
 
   return (
     <div
@@ -310,6 +346,13 @@ export function ManualCrawlModal({
             </p>
           </div>
 
+          {submitting && (
+            <div className="rounded border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-xs text-[#475569]">
+              Đang gửi lệnh kích hoạt tới API (nếu API trên Render vừa thức dậy, bước này có thể
+              mất 25–45 giây)...
+            </div>
+          )}
+
           {errorMessage && (
             <div className="rounded border border-rose-200 bg-rose-50/70 px-3.5 py-2.5 text-xs text-rose-800">
               {errorMessage}
@@ -346,11 +389,7 @@ export function ManualCrawlModal({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="font-mono font-semibold text-[#0F172A]">{queuedRun.run_code}</p>
-                  <p className="mt-0.5 text-[#475569]">
-                    {isTrackingActive
-                      ? "Đang theo dõi tiến trình Worker (cập nhật mỗi 3 giây)..."
-                      : "Phiên thu thập đã hoàn tất."}
-                  </p>
+                  <p className="tabular-nums mt-0.5 text-[#475569]">{statusHelperText()}</p>
                 </div>
                 {currentStatus && <RunStatusBadge status={currentStatus} />}
               </div>
@@ -407,7 +446,7 @@ export function ManualCrawlModal({
               {submitting || isTrackingActive ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
-                  <span>{isTrackingActive ? "Đang chạy..." : "Đang xếp hàng..."}</span>
+                  <span>{isTrackingActive ? "Đang chạy..." : "Đang gửi..."}</span>
                 </>
               ) : (
                 <>
@@ -422,4 +461,3 @@ export function ManualCrawlModal({
     </div>
   );
 }
-
