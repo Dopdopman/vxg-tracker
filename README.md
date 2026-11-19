@@ -12,7 +12,7 @@ Hệ thống tự động thu thập, kiểm chứng nguồn gốc và hiển th
 - **Production Free Stack (Singapore):**
   - **Neon PostgreSQL 16** (tự động chuẩn hóa `sslmode`/`channel_binding` cho `asyncpg` & `psycopg`, `pool_pre_ping=True`, `pool_recycle=300`).
   - **Render Free (`vxg-api`)** — FastAPI server cấu hình bằng [`render.yaml`](render.yaml), tự động chạy migration/seed lúc boot qua [`apps/api/entrypoint.sh`](apps/api/entrypoint.sh), nhận nút *"Chạy cào thủ công"* trên `/audit` và dispatch tới GitHub Actions (`WORKER_DISPATCH_MODE=github_actions`).
-  - **GitHub Actions Crawler Worker** ([`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml)) — Chạy lịch định kỳ theo giờ Việt Nam (`UTC+7`) và thực thi theo `--run-id` khi admin kích hoạt thủ công trên UI.
+  - **GitHub Actions Crawler Worker** ([`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml)) — Chạy 1 lần/ngày lúc **00:15 sáng theo giờ Việt Nam (`UTC+7`, cron `15 17 * * *` UTC)** quét toàn bộ (`ALL`) + dọn snapshot quá 90 ngày trong cùng 1 phiên, và thực thi theo `--run-id` khi admin kích hoạt thủ công trên UI.
   - **Vercel Hobby (`apps/web`)** — Next.js 15 App Router deploy tại region `sin1` ([`apps/web/vercel.json`](apps/web/vercel.json)).
 
 ```mermaid
@@ -31,7 +31,7 @@ flowchart LR
 
 - **2-Tier Fetcher & Chống chặn bot:** Ưu tiên `httpx` với HTTP header chuẩn `vi-VN`, retry exponential backoff + jitter; tự fallback sang **Playwright Chromium** headless khi trang render JS hoặc gặp WAF/cookie challenge.
 - **Kiểm chứng 6 tầng (`6-Layer Validation Guardrails`) & Đối chứng chéo:** Kiểm tra kiểu/SHA-256/URL, chặn giá `<= 0`, kiểm tra logic mua/bán & quy cách bình gas, kiểm tra biên độ hợp lý, chống nhảy giá đột biến (`PRICE_SPIKE_THRESHOLD_PCT=15%`), chuẩn hóa `Asia/Ho_Chi_Minh`, idempotent upsert và đối chiếu chéo Tier 1 ↔ Tier 2 (`CROSS_CHECKED`).
-- **Zero Stuck Jobs & Fail-Safe:** Khi ở chế độ `github_actions`, nếu lệnh dispatch sang GitHub API thất bại (timeout hoặc HTTP 4xx/5xx), API lập tức cập nhật bản ghi `crawl_runs` sang `FAILED` và trả mã lỗi `502 GITHUB_DISPATCH_FAILED` thống nhất.
+- **Zero Stuck Jobs & Fail-Safe:** Khi ở chế độ `github_actions`, nếu lệnh dispatch sang GitHub API thất bại (timeout hoặc HTTP 4xx/5xx), API lập tức cập nhật bản ghi `crawl_runs` sang `FAILED` và trả mã lỗi `502 GITHUB_DISPATCH_FAILED` thống nhất. Đồng thời trước khi kiểm tra trùng lặp, API tự động hết hạn các bản ghi `QUEUED` tạo quá **15 phút** sang `FAILED` (`Timed out waiting in QUEUED state (>15m)`) để nút chạy cào thủ công không bao giờ bị khóa vĩnh viễn.
 - **Snapshot Retention 90 ngày:** Tự động xóa bản nén gzip `raw_evidence_snapshots` quá hạn mà vẫn giữ toàn vẹn `price_records`, `crawl_runs` và SHA-256 của mức giá `VERIFIED` mới nhất.
 - **Giao diện Financial / Editorial (`tabular-nums`):** Bảng giá tối giản, quy đổi nhanh **VND / Lượng ↔ VND / Chỉ**, **Evidence Drawer** kiểm chứng nguồn gốc và trang `/audit` đầy đủ.
 
@@ -46,7 +46,7 @@ flowchart LR
 | **Scraper Worker** | [`apps/worker`](apps/worker) | 2-Tier Fetcher, 11 adapters VN thật, 6-Layer Guardrails, CLI `--run-id`, APScheduler `UTC+7` (local), `AlertNotifier`, Snapshot Retention |
 | **Web Dashboard** | [`apps/web`](apps/web) | Next.js 15 + Tailwind v4 (`/` Bảng giá, Evidence Drawer, `/audit` Kiểm toán & Modal chạy thủ công hỗ trợ cold start) |
 | **CI Workflow** | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lint, `mypy`, offline `pytest`, integration test trên Postgres 16, Next.js build + secret scan, Docker Buildx check |
-| **Crawler Workflow** | [`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml) | Scheduled cron (`UTC+7`) + `workflow_dispatch` nhận `scope` & `run_id` chạy Playwright trên `ubuntu-latest` |
+| **Crawler Workflow** | [`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml) | Scheduled cron `00:15 UTC+7` hằng ngày (`ALL` + `prune-snapshots --retention-days 90`) + `workflow_dispatch` nhận `scope` & `run_id` chạy Playwright trên `ubuntu-latest` |
 | **Render Blueprint** | [`render.yaml`](render.yaml) | Cấu hình deploy `vxg-api` miễn phí tại region Singapore |
 | **Hướng dẫn Deploy** | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Hướng dẫn từng bước triển khai **Neon + GitHub Actions + Render Free + Vercel Hobby + cron-job.org** |
 
@@ -56,17 +56,17 @@ flowchart LR
 
 | Nhóm | Mã nguồn (`code`) | Phân tầng | Chiến lược | Lịch quét (`UTC+7`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Vàng** | `SJC_OFFICIAL_XML` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_JSON` | `08:45`, `11:30`, `15:20`, `17:15` |
-| **Vàng** | `DOJI_BOARD` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Cùng lịch Vàng |
-| **Vàng** | `PNJ_HTML` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Cùng lịch Vàng |
-| **Vàng** | `CAFEF_GOLD_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_JSON` | Cùng lịch Vàng |
-| **Xăng dầu** | `PETROLIMEX_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `15:20` & `17:15` (cùng `ALL`) |
-| **Xăng dầu** | `SAIGONPETRO_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | Cùng lịch Xăng dầu |
-| **Xăng dầu** | `WEBGIA_FUEL_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` | Cùng lịch Xăng dầu |
-| **Gas** | `PETROLIMEX_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `15:20`, `17:15` & `03:15` ngày 01 |
-| **Gas** | `SAIGONPETRO_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | Cùng lịch Gas |
-| **Gas** | `PVGAS_LPG` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | Cùng lịch Gas |
-| **Gas** | `VIETNAMBIZ_GAS_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` (2 bước) | Cùng lịch Gas |
+| **Vàng** | `SJC_OFFICIAL_XML` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_JSON` | `00:15` hàng ngày (Production `ALL`) |
+| **Vàng** | `DOJI_BOARD` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
+| **Vàng** | `PNJ_HTML` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
+| **Vàng** | `CAFEF_GOLD_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_JSON` | `00:15` hàng ngày (Production `ALL`) |
+| **Xăng dầu** | `PETROLIMEX_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
+| **Xăng dầu** | `SAIGONPETRO_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | `00:15` hàng ngày (Production `ALL`) |
+| **Xăng dầu** | `WEBGIA_FUEL_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` | `00:15` hàng ngày (Production `ALL`) |
+| **Gas** | `PETROLIMEX_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
+| **Gas** | `SAIGONPETRO_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | `00:15` hàng ngày (Production `ALL`) |
+| **Gas** | `PVGAS_LPG` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
+| **Gas** | `VIETNAMBIZ_GAS_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` (2 bước) | `00:15` hàng ngày (Production `ALL`) |
 
 *(Trên Docker Compose local, `vxg_worker` chạy đầy đủ bộ 10 job APScheduler chi tiết hơn theo ngày trong tuần/giờ Việt Nam.)*
 

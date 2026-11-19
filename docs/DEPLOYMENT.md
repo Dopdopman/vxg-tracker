@@ -41,13 +41,9 @@ Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1
 
 | Giờ UTC (Cron) | Giờ Việt Nam (`UTC+7`) | Phạm vi thực thi | Mục đích |
 | :--- | :--- | :--- | :--- |
-| `45 1 * * *` | `08:45` hằng ngày | `GOLD` | Mở phiên giá vàng sáng |
-| `30 4 * * *` | `11:30` hằng ngày | `GOLD` | Cập nhật giá vàng trưa |
-| `20 8 * * *` | `15:20` hằng ngày | `ALL` | Giá vàng chiều + bắt kỳ điều hành xăng dầu `15:00` Thứ Năm |
-| `15 10 * * *` | `17:15` hằng ngày | `ALL` | Chốt phiên cuối ngày cho cả Vàng, Xăng dầu, Gas |
-| `15 20 * * *` | `03:15` hằng ngày | `prune-snapshots` (+ `GAS` mùng 1) | Dọn snapshot quá 90 ngày + quét giá Gas ngày 01 đầu tháng |
+| `15 17 * * *` | `00:15` sáng hằng ngày | `ALL` + `prune-snapshots --retention-days 90` | Quét đủ Vàng, Xăng dầu, Gas ngay khi bước qua ngày mới và dọn snapshot quá 90 ngày trong cùng 1 phiên chạy |
 
-*(Ước tính tổng thời gian chạy ~150–250 phút/tháng trên `ubuntu-latest`, nằm gọn trong hạn mức **2.000 phút/tháng miễn phí** của GitHub Actions cho private repo hoặc không giới hạn với public repo.)*
+*(Ước tính tổng thời gian chạy ~40–75 phút/tháng trên `ubuntu-latest`, tiết kiệm tối đa trong hạn mức **2.000 phút/tháng miễn phí** của GitHub Actions cho private repo hoặc không giới hạn với public repo. Ngoài ra, `vxg-api` tự động hết hạn các bản ghi `QUEUED` quá **15 phút** sang `FAILED` trước khi kiểm tra trùng lặp, tránh khóa nút chạy cào thủ công trên `/audit` nếu GitHub Actions gặp sự cố trước khi kết nối DB.)*
 
 ---
 

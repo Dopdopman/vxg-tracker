@@ -2,16 +2,8 @@ name: Crawl Schedule & On-Demand Worker
 
 on:
   schedule:
-    # 08:45 Asia/Ho_Chi_Minh -> 01:45 UTC (Sáng: cập nhật Vàng)
-    - cron: "45 1 * * *"
-    # 11:30 Asia/Ho_Chi_Minh -> 04:30 UTC (Trưa: cập nhật Vàng)
-    - cron: "30 4 * * *"
-    # 15:20 Asia/Ho_Chi_Minh -> 08:20 UTC (Chiều + kỳ điều hành Xăng dầu Thứ Năm)
-    - cron: "20 8 * * *"
-    # 17:15 Asia/Ho_Chi_Minh -> 10:15 UTC (Chốt ngày: quét đủ Vàng, Xăng dầu, Gas)
-    - cron: "15 10 * * *"
-    # 03:15 Asia/Ho_Chi_Minh -> 20:15 UTC (Dọn snapshot quá hạn + quét Gas ngày mùng 1)
-    - cron: "15 20 * * *"
+    # 00:15 Asia/Ho_Chi_Minh -> 17:15 UTC (Hàng ngày: quét đủ Vàng, Xăng dầu, Gas + dọn snapshot quá 90 ngày)
+    - cron: "15 17 * * *"
   workflow_dispatch:
     inputs:
       scope:
@@ -104,22 +96,7 @@ jobs:
               .venv/bin/python -m vxg_worker.cli run --scope "$SCOPE" --trigger MANUAL_ADMIN
             fi
           else
-            case "${{ github.event.schedule }}" in
-              "45 1 * * *"|"30 4 * * *")
-                .venv/bin/python -m vxg_worker.cli run --scope GOLD --trigger SCHEDULED
-                ;;
-              "20 8 * * *"|"15 10 * * *")
-                .venv/bin/python -m vxg_worker.cli run --scope ALL --trigger SCHEDULED
-                ;;
-              "15 20 * * *")
-                .venv/bin/python -m vxg_worker.cli prune-snapshots --retention-days "${SNAPSHOT_RETENTION_DAYS:-90}"
-                if [ "$(TZ=Asia/Ho_Chi_Minh date +%d)" = "01" ]; then
-                  .venv/bin/python -m vxg_worker.cli run --scope GAS --trigger SCHEDULED
-                fi
-                ;;
-              *)
-                .venv/bin/python -m vxg_worker.cli run --scope ALL --trigger SCHEDULED
-                ;;
-            esac
+            .venv/bin/python -m vxg_worker.cli run --scope ALL --trigger SCHEDULED
+            .venv/bin/python -m vxg_worker.cli prune-snapshots --retention-days 90
           fi
 

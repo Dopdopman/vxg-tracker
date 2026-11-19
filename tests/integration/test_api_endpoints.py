@@ -420,6 +420,10 @@ async def test_audit_summary_runs_detail_sources_health_and_anomalies() -> None:
     async with _api_test_client() as (client, _app):
         summary_resp = await client.get("/api/v1/audit/summary")
         runs_resp = await client.get("/api/v1/audit/runs", params={"limit": 5, "offset": 0})
+        completed_all_resp = await client.get(
+            "/api/v1/audit/runs",
+            params={"scope": "ALL", "status": "COMPLETED", "limit": 5, "offset": 0},
+        )
         health_resp = await client.get("/api/v1/sources/health")
         open_anom_resp = await client.get("/api/v1/audit/anomalies", params={"status": "OPEN"})
         res_anom_resp = await client.get("/api/v1/audit/anomalies", params={"status": "RESOLVED"})
@@ -427,11 +431,10 @@ async def test_audit_summary_runs_detail_sources_health_and_anomalies() -> None:
 
         assert runs_resp.status_code == 200
         runs_body = runs_resp.json()
-        completed_run = next(
-            r
-            for r in runs_body["items"]
-            if r["scope_category"] == "ALL" and r["status"] == "COMPLETED"
-        )
+        assert completed_all_resp.status_code == 200
+        completed_all_items = completed_all_resp.json()["items"]
+        assert len(completed_all_items) >= 1
+        completed_run = completed_all_items[0]
         run_detail_resp = await client.get(f"/api/v1/audit/runs/{completed_run['id']}")
 
     assert summary_resp.status_code == 200
