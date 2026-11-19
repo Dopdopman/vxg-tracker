@@ -28,6 +28,17 @@ def assert_not_soft_404(fetch_result: FetchResult, source: Source) -> None:
         raise SchemaDriftError(f"Soft-404 detected for {source.code}: {soft_404}")
 
 
+@dataclass(frozen=True, slots=True)
+class WafFallbackSpec:
+    """Declarative fallback fetch specification when a primary source hits a WAF block."""
+
+    fallback_url: str
+    fetch_strategy: str
+    referer: str | None
+    fallback_provider: str
+    audit_note: str
+
+
 @dataclass(slots=True)
 class AdapterParseResult:
     """Standard output emitted by a source adapter parse pass."""
@@ -45,6 +56,25 @@ class BaseSourceAdapter(ABC):
     def extract_detail_url(self, listing_result: FetchResult, source: Source) -> str | None:
         """Optional step 1 for 2-step sources: return detail notice/article URL to fetch next."""
         return None
+
+    def get_waf_fallback(
+        self, fetch_result: FetchResult, source: Source
+    ) -> WafFallbackSpec | None:
+        """Return optional fallback fetch spec when primary URL hits WAF block (HTTP 403)."""
+        return None
+
+    def parse_waf_fallback(
+        self,
+        fetch_result: FetchResult,
+        source: Source,
+        fallback_spec: WafFallbackSpec,
+        primary_result: FetchResult,
+    ) -> AdapterParseResult:
+        """Parse fallback bytes into normalized PriceCandidates with explicit audit metadata."""
+        raise NotImplementedError(
+            f"{type(self).__name__} returned WafFallbackSpec but did not implement "
+            "parse_waf_fallback"
+        )
 
     @abstractmethod
     def parse(self, fetch_result: FetchResult, source: Source) -> AdapterParseResult:

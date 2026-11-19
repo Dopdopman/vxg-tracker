@@ -44,6 +44,7 @@ class PriceCandidate:
     evidence_sha256: str
     cross_check_source_id: int | None = None
     cross_check_delta_pct: Decimal | None = None
+    audit_notes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -121,6 +122,9 @@ class ValidationEngine:
 
     def validate(self, candidate: PriceCandidate, ctx: ValidationContext) -> ValidationDecision:
         notes: dict[str, Any] = {"layers": {}}
+        for note_key, note_val in candidate.audit_notes.items():
+            if note_key != "layers":
+                notes[note_key] = note_val
 
         # --- Layer 1: Structure & Types ---
         url_ok = isinstance(candidate.source_url, str) and candidate.source_url.startswith(

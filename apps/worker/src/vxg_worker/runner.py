@@ -26,7 +26,12 @@ from vxg_shared.enums import (
     TriggerType,
 )
 from vxg_shared.timezone import format_vn_run_code, vn_now
-from vxg_worker.adapters.base import AdapterParseResult, AdapterRegistry, SchemaDriftError
+from vxg_worker.adapters.base import (
+    AdapterParseResult,
+    AdapterRegistry,
+    SchemaDriftError,
+    WafFallbackSpec,
+)
 from vxg_worker.adapters.registry import build_default_adapter_registry
 from vxg_worker.config import WorkerSettings
 from vxg_worker.fetcher.two_tier import TwoTierFetcher
@@ -93,6 +98,7 @@ class _ParsedSourceBatch:
     parse_result: AdapterParseResult
     metadata: dict[str, object]
     summary_idx: int
+    waf_fallback_provider: str | None = None
 
 
 def _compute_candidate_delta_pct(primary: PriceCandidate, reference: PriceCandidate) -> float:
@@ -270,7 +276,7 @@ class CrawlRunner:
     ) -> CrawlRunSummary:
         source_summaries: list[SourceLogSummary] = []
         parsed_batches: list[_ParsedSourceBatch] = []
-        tier2_refs: dict[tuple[str, str], tuple[int, PriceCandidate]] = {}
+        tier2_refs: dict[tuple[str, str], tuple[int, str, PriceCandidate]] = {}
 
         sources_queried = 0
         pages_success = 0
@@ -291,41 +297,108 @@ class CrawlRunner:
             sources = list((await session.execute(stmt)).scalars().all())
             catalog = await load_catalog_lookup(session)
 
-            # --- Phase 1: Fetch (including 2-step listing->detail) & Parse ---
+            # --- Phase 1: Fetch (including 2-step & WAF fallback) & Parse ---
             for source in sources:
                 sources_queried += 1
                 fetch_result = await fetcher.fetch_source(source)
                 active_result = fetch_result
                 total_elapsed_ms = fetch_result.response_time_ms
+                total_attempts = fetch_result.attempts
+                used_waf_fallback: WafFallbackSpec | None = None
+                adapter = self._registry.resolve(source.parser_key, smoke_only=smoke_only)
 
-                snapshot_id: uuid.UUID | None = None
-                content_sha256 = fetch_result.content_sha256
-                if fetch_result.raw_bytes:
-                    snapshot_id, content_sha256 = await store_raw_snapshot(
-                        session,
-                        raw_bytes=fetch_result.raw_bytes,
-                        content_type=fetch_result.content_type,
-                    )
-
-                final_fetch_status = fetch_result.fetch_status
-                error_code = fetch_result.error_code
-                error_message = fetch_result.error_message
                 base_metadata: dict[str, object] = {
                     "fallback_triggered": fetch_result.fallback_triggered,
-                    "attempts": fetch_result.attempts,
+                    "attempts": total_attempts,
                     **fetch_result.metadata,
                 }
+
+                if fetch_result.fetch_status != FetchStatus.SUCCESS and not smoke_only:
+                    waf_spec = adapter.get_waf_fallback(fetch_result, source)
+                    if waf_spec is not None:
+                        logger.warning(
+                            "Primary source %s blocked (%s, HTTP %s); falling back to %s (%s)",
+                            source.code,
+                            fetch_result.fetch_status.value,
+                            fetch_result.http_status,
+                            waf_spec.fallback_provider,
+                            waf_spec.fallback_url,
+                        )
+                        fallback_result = await fetcher.fetch_url(
+                            waf_spec.fallback_url,
+                            fetch_strategy=waf_spec.fetch_strategy,
+                            timeout_ms=source.timeout_ms,
+                            rate_limit_delay_ms=source.rate_limit_delay_ms,
+                            referer=waf_spec.referer,
+                        )
+                        total_elapsed_ms += fallback_result.response_time_ms
+                        total_attempts += fallback_result.attempts
+                        base_metadata.update(
+                            {
+                                "fallback_triggered": True,
+                                "attempts": total_attempts,
+                                "waf_fallback_triggered": True,
+                                "waf_fallback_provider": waf_spec.fallback_provider,
+                                "waf_fallback_url": waf_spec.fallback_url,
+                                "source_detail": waf_spec.audit_note,
+                                "primary_blocked_attempt": {
+                                    "request_url": fetch_result.request_url,
+                                    "final_url": fetch_result.final_url,
+                                    "http_status": fetch_result.http_status,
+                                    "fetch_status": fetch_result.fetch_status.value,
+                                    "tier_used": fetch_result.tier_used.value,
+                                    "error_code": fetch_result.error_code,
+                                    "error_message": fetch_result.error_message,
+                                },
+                            }
+                        )
+                        active_result = fallback_result
+                        if fallback_result.fetch_status == FetchStatus.SUCCESS:
+                            used_waf_fallback = waf_spec
+                            fallback_result.fallback_triggered = True
+                        else:
+                            base_metadata["waf_fallback_failed"] = True
+                            primary_err = (
+                                fetch_result.error_message or fetch_result.fetch_status.value
+                            )
+                            fallback_err = (
+                                fallback_result.error_message
+                                or fallback_result.fetch_status.value
+                            )
+                            fallback_result.error_message = (
+                                f"Primary {primary_err}; WAF fallback ({waf_spec.fallback_provider}) "
+                                f"also failed: {fallback_err}"
+                            )
+
+                snapshot_id: uuid.UUID | None = None
+                content_sha256 = active_result.content_sha256
+                if active_result.raw_bytes:
+                    snapshot_id, content_sha256 = await store_raw_snapshot(
+                        session,
+                        raw_bytes=active_result.raw_bytes,
+                        content_type=active_result.content_type,
+                    )
+                    active_result.content_sha256 = content_sha256
+
+                final_fetch_status = active_result.fetch_status
+                error_code = active_result.error_code
+                error_message = active_result.error_message
+                resolved_final_url = active_result.final_url or (
+                    used_waf_fallback.fallback_url
+                    if used_waf_fallback is not None
+                    else active_result.request_url
+                )
 
                 source_log = CrawlSourceLog(
                     crawl_run_id=run_id,
                     source_id=source.id,
                     snapshot_id=snapshot_id,
                     request_url=fetch_result.request_url,
-                    final_url=fetch_result.final_url,
-                    http_status=fetch_result.http_status,
-                    fetch_strategy_used=fetch_result.tier_used.value,
+                    final_url=resolved_final_url,
+                    http_status=active_result.http_status,
+                    fetch_strategy_used=active_result.tier_used.value,
                     response_time_ms=total_elapsed_ms,
-                    attempt_number=fetch_result.attempts,
+                    attempt_number=total_attempts,
                     fetch_status=final_fetch_status.value,
                     documents_parsed=0,
                     records_extracted=0,
@@ -342,12 +415,11 @@ class CrawlRunner:
                 summary_idx = len(source_summaries)
                 src_docs = 0
 
-                if fetch_result.fetch_status == FetchStatus.SUCCESS:
+                if active_result.fetch_status == FetchStatus.SUCCESS:
                     try:
-                        adapter = self._registry.resolve(source.parser_key, smoke_only=smoke_only)
                         detail_url = (
                             None
-                            if smoke_only
+                            if smoke_only or used_waf_fallback is not None
                             else adapter.extract_detail_url(fetch_result, source)
                         )
                         if detail_url:
@@ -421,7 +493,12 @@ class CrawlRunner:
                                 continue
 
                         pages_success += 1
-                        parse_res = adapter.parse(active_result, source)
+                        if used_waf_fallback is not None:
+                            parse_res = adapter.parse_waf_fallback(
+                                active_result, source, used_waf_fallback, fetch_result
+                            )
+                        else:
+                            parse_res = adapter.parse(active_result, source)
                         src_docs = parse_res.documents_parsed
                         docs_parsed += src_docs
                         base_metadata = {**base_metadata, **parse_res.parser_metadata}
@@ -429,7 +506,7 @@ class CrawlRunner:
                         if source.tier == SourceTier.SECONDARY_CROSSCHECK.value:
                             for cand in parse_res.candidates:
                                 key = (cand.commodity_code, cand.location_code)
-                                tier2_refs.setdefault(key, (source.id, cand))
+                                tier2_refs.setdefault(key, (source.id, source.code, cand))
 
                         source.last_success_at = vn_now()
                         source.consecutive_failures = 0
@@ -441,6 +518,11 @@ class CrawlRunner:
                                 parse_result=parse_res,
                                 metadata=base_metadata,
                                 summary_idx=summary_idx,
+                                waf_fallback_provider=(
+                                    used_waf_fallback.fallback_provider
+                                    if used_waf_fallback is not None
+                                    else None
+                                ),
                             )
                         )
                     except SchemaDriftError as exc:
@@ -480,7 +562,7 @@ class CrawlRunner:
                 else:
                     pages_failed += 1
                     run_errors.append(
-                        f"{source.code}: {fetch_result.fetch_status.value} "
+                        f"{source.code}: {active_result.fetch_status.value} "
                         f"({error_message or error_code})"
                     )
                     raised_anomalies.extend(
@@ -510,7 +592,11 @@ class CrawlRunner:
                         response_time_ms=total_elapsed_ms,
                         byte_size=active_result.byte_size,
                         content_sha256=content_sha256,
-                        fallback_triggered=active_result.fallback_triggered,
+                        fallback_triggered=(
+                            used_waf_fallback is not None
+                            or fetch_result.fallback_triggered
+                            or active_result.fallback_triggered
+                        ),
                         documents_parsed=src_docs,
                         records_extracted=0,
                         records_verified=0,
@@ -558,8 +644,12 @@ class CrawlRunner:
                         continue
 
                     t2_match = tier2_refs.get((candidate.commodity_code, candidate.location_code))
-                    if t2_match is not None and candidate.cross_check_source_id is None:
-                        t2_source_id, t2_cand = t2_match
+                    if (
+                        t2_match is not None
+                        and candidate.cross_check_source_id is None
+                        and t2_match[1] != batch.waf_fallback_provider
+                    ):
+                        t2_source_id, _t2_source_code, t2_cand = t2_match
                         delta_pct = _compute_candidate_delta_pct(candidate, t2_cand)
                         candidate.cross_check_source_id = t2_source_id
                         candidate.cross_check_delta_pct = Decimal(f"{delta_pct:.3f}")

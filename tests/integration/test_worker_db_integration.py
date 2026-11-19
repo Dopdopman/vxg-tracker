@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -41,6 +42,7 @@ from vxg_worker.adapters.base import (
     BaseSourceAdapter,
     SchemaDriftError,
 )
+from vxg_worker.adapters.gold.sjc_json import CAFEF_SJC_FALLBACK_URL, SJC_WAF_FALLBACK_NOTE
 from vxg_worker.config import WorkerSettings
 from vxg_worker.fetcher.two_tier import TwoTierFetcher
 from vxg_worker.fetcher.types import FetcherTier, FetchResult
@@ -54,6 +56,12 @@ _HOST_TEST_DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql+asyncpg://vxg:vxg_dev_password@localhost:5432/vxg_tracker",
 )
+_FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
+_GOLD_FIXTURE_BYTES: dict[str, bytes] = {
+    "gold/cafef_gold.json": (_FIXTURES_DIR / "gold/cafef_gold.json").read_bytes(),
+    "gold/doji_board.html": (_FIXTURES_DIR / "gold/doji_board.html").read_bytes(),
+    "gold/pnj_gold.html": (_FIXTURES_DIR / "gold/pnj_gold.html").read_bytes(),
+}
 
 
 class _StubTwoTierFetcher(TwoTierFetcher):
@@ -736,6 +744,211 @@ async def test_stale_queued_run_auto_expires_and_unblocks_manual_trigger() -> No
                 )
                 await cleanup.commit()
         await engine.dispose()
+
+
+class _SjcBlockedGoldenFetcher(TwoTierFetcher):
+    """Test fetcher returning HTTP 403 for SJC primary endpoint and golden fixtures elsewhere."""
+
+    def __init__(self, gold_fixtures: dict[str, bytes]) -> None:
+        super().__init__()
+        self._gold_fixtures = gold_fixtures
+        self._cafef_bytes = gold_fixtures["gold/cafef_gold.json"]
+        self._cafef_sha = compute_content_sha256(self._cafef_bytes)
+
+    async def fetch_source(self, source: Source) -> FetchResult:
+        if source.code == "SJC_OFFICIAL_XML":
+            blocked_html = b"<html><title>403 Forbidden</title><body>WAF Block</body></html>"
+            return FetchResult(
+                request_url=source.endpoint_url,
+                final_url=source.endpoint_url,
+                http_status=403,
+                content_type="text/html; charset=utf-8",
+                raw_bytes=blocked_html,
+                content_sha256=compute_content_sha256(blocked_html),
+                byte_size=len(blocked_html),
+                response_time_ms=90,
+                attempts=1,
+                tier_used=FetcherTier.PLAYWRIGHT,
+                fetch_status=FetchStatus.BLOCKED,
+                fallback_triggered=True,
+                error_code="HTTP_403",
+                error_message="HTTP 403 blocked by SJC WAF",
+            )
+
+        fixture_map = {
+            "DOJI_BOARD": ("gold/doji_board.html", "text/html; charset=utf-8"),
+            "PNJ_HTML": ("gold/pnj_gold.html", "text/html; charset=utf-8"),
+            "CAFEF_GOLD_CROSSCHECK": ("gold/cafef_gold.json", "application/json; charset=utf-8"),
+        }
+        rel_path, content_type = fixture_map[source.code]
+        raw = self._gold_fixtures[rel_path]
+        return FetchResult(
+            request_url=source.endpoint_url,
+            final_url=source.endpoint_url,
+            http_status=200,
+            content_type=content_type,
+            raw_bytes=raw,
+            content_sha256=compute_content_sha256(raw),
+            byte_size=len(raw),
+            response_time_ms=25,
+            attempts=1,
+            tier_used=FetcherTier.HTTPX,
+            fetch_status=FetchStatus.SUCCESS,
+        )
+
+    async def fetch_url(
+        self,
+        url: str,
+        *,
+        fetch_strategy: str,
+        timeout_ms: int,
+        rate_limit_delay_ms: int,
+        referer: str | None = None,
+    ) -> FetchResult:
+        assert url == CAFEF_SJC_FALLBACK_URL
+        return FetchResult(
+            request_url=url,
+            final_url=url,
+            http_status=200,
+            content_type="application/json; charset=utf-8",
+            raw_bytes=self._cafef_bytes,
+            content_sha256=self._cafef_sha,
+            byte_size=len(self._cafef_bytes),
+            response_time_ms=35,
+            attempts=1,
+            tier_used=FetcherTier.HTTPX,
+            fetch_status=FetchStatus.SUCCESS,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sjc_waf_fallback_on_403_persists_cafef_snapshot_and_audit_evidence() -> None:
+    """When SJC_OFFICIAL_XML hits 403, worker falls back to CafeF with real SHA-256 & URL."""
+    engine = create_async_db_engine(_HOST_TEST_DB_URL)
+    session_factory = create_session_factory(engine)
+    cafef_sha = compute_content_sha256(_GOLD_FIXTURE_BYTES["gold/cafef_gold.json"])
+
+    created_run_ids: list[uuid.UUID] = []
+    candidate_shas: set[str] = {cafef_sha}
+    original_source_state: dict[int, tuple[Any, int]] = {}
+
+    async with session_factory() as setup_session:
+        gold_sources = (
+            await setup_session.execute(select(Source).where(Source.category == "GOLD"))
+        ).scalars().all()
+        for src in gold_sources:
+            original_source_state[src.id] = (src.last_success_at, src.consecutive_failures)
+        sjc_src = next(s for s in gold_sources if s.code == "SJC_OFFICIAL_XML")
+
+    for rel in ("gold/doji_board.html", "gold/pnj_gold.html"):
+        candidate_shas.add(compute_content_sha256(_GOLD_FIXTURE_BYTES[rel]))
+
+    worker_settings = WorkerSettings.model_validate(
+        {
+            "DATABASE_URL": _HOST_TEST_DB_URL,
+            "DATABASE_URL_SYNC": None,
+            "advisory_lock_key": 908_712_995,
+            "price_spike_threshold_pct": 50.0,
+        }
+    )
+
+    try:
+        runner = CrawlRunner(
+            engine=engine,
+            session_factory=session_factory,
+            settings=worker_settings,
+            fetcher=_SjcBlockedGoldenFetcher(_GOLD_FIXTURE_BYTES),
+        )
+        summary = await runner.execute_run(
+            scope=CrawlScope.GOLD,
+            trigger_type=TriggerType.MANUAL_ADMIN,
+        )
+        created_run_ids.append(summary.run_id)
+
+        assert summary.status == CrawlRunStatus.COMPLETED.value
+        assert summary.pages_fetched_failed == 0
+
+        sjc_summary = next(s for s in summary.source_logs if s.source_code == "SJC_OFFICIAL_XML")
+        assert sjc_summary.fetch_status == FetchStatus.SUCCESS.value
+        assert sjc_summary.http_status == 200
+        assert sjc_summary.content_sha256 == cafef_sha
+        assert sjc_summary.fallback_triggered is True
+
+        async with session_factory() as verify_session:
+            sjc_log = (
+                await verify_session.execute(
+                    select(CrawlSourceLog).where(
+                        CrawlSourceLog.crawl_run_id == summary.run_id,
+                        CrawlSourceLog.source_id == sjc_src.id,
+                    )
+                )
+            ).scalar_one()
+
+            assert sjc_log.fetch_status == FetchStatus.SUCCESS.value
+            assert sjc_log.http_status == 200
+            assert sjc_log.final_url == CAFEF_SJC_FALLBACK_URL
+            assert sjc_log.content_sha256 == cafef_sha
+            assert sjc_log.snapshot_id is not None
+            assert sjc_log.parser_metadata["waf_fallback_triggered"] is True
+            assert sjc_log.parser_metadata["waf_fallback_provider"] == "CAFEF_GOLD_CROSSCHECK"
+            assert sjc_log.parser_metadata["waf_fallback_url"] == CAFEF_SJC_FALLBACK_URL
+            assert sjc_log.parser_metadata["source_detail"] == SJC_WAF_FALLBACK_NOTE
+            assert sjc_log.parser_metadata["primary_blocked_attempt"]["http_status"] == 403
+
+            snapshot = await verify_session.get(RawEvidenceSnapshot, sjc_log.snapshot_id)
+            assert snapshot is not None
+            assert snapshot.content_sha256 == cafef_sha
+
+            sjc_prices = (
+                await verify_session.execute(
+                    select(PriceRecord).where(
+                        PriceRecord.crawl_run_id == summary.run_id,
+                        PriceRecord.source_id == sjc_src.id,
+                    )
+                )
+            ).scalars().all()
+            assert len(sjc_prices) == 3
+
+            for rec in sjc_prices:
+                assert rec.source_url == CAFEF_SJC_FALLBACK_URL
+                assert rec.evidence_sha256 == cafef_sha
+                assert rec.verification_status == VerificationStatus.VERIFIED.value
+                assert rec.cross_check_source_id is None
+                assert rec.validation_notes["source_detail"] == SJC_WAF_FALLBACK_NOTE
+                assert rec.validation_notes["waf_fallback"]["fallback_url"] == CAFEF_SJC_FALLBACK_URL
+                assert rec.validation_notes["waf_fallback"]["fallback_sha256"] == cafef_sha
+    finally:
+        async with session_factory() as cleanup:
+            if created_run_ids:
+                await cleanup.execute(
+                    delete(AnomalyAlert).where(AnomalyAlert.crawl_run_id.in_(created_run_ids))
+                )
+                await cleanup.execute(
+                    delete(PriceRecord).where(PriceRecord.crawl_run_id.in_(created_run_ids))
+                )
+                await cleanup.execute(
+                    delete(CrawlSourceLog).where(CrawlSourceLog.crawl_run_id.in_(created_run_ids))
+                )
+                await cleanup.execute(delete(CrawlRun).where(CrawlRun.id.in_(created_run_ids)))
+            await cleanup.execute(
+                delete(RawEvidenceSnapshot).where(
+                    RawEvidenceSnapshot.content_sha256.in_(candidate_shas),
+                    ~RawEvidenceSnapshot.id.in_(
+                        select(CrawlSourceLog.snapshot_id).where(
+                            CrawlSourceLog.snapshot_id.is_not(None)
+                        )
+                    ),
+                )
+            )
+            for src_id, (prev_last, prev_fail) in original_source_state.items():
+                await cleanup.execute(
+                    update(Source)
+                    .where(Source.id == src_id)
+                    .values(last_success_at=prev_last, consecutive_failures=prev_fail)
+                )
+            await cleanup.commit()
+        await engine.dispose()
+
 
 
 
