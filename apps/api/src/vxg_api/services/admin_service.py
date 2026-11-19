@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import timedelta
 
 import httpx
 from fastapi import status
@@ -17,7 +18,7 @@ from vxg_api.schemas.admin import TriggerCrawlRunResponse
 from vxg_api.schemas.common import to_vn_iso
 from vxg_shared.db.models import CrawlRun
 from vxg_shared.enums import CrawlRunStatus, CrawlScope, TriggerType
-from vxg_shared.timezone import format_vn_run_code, vn_now
+from vxg_shared.timezone import format_vn_run_code, to_vn_tz, vn_now
 
 logger = logging.getLogger("vxg_api.admin")
 
@@ -28,6 +29,8 @@ _ACTIVE_RUN_STATUSES: tuple[str, ...] = (
     CrawlRunStatus.QUEUED.value,
     CrawlRunStatus.RUNNING.value,
 )
+_STALE_QUEUED_TIMEOUT = timedelta(minutes=15)
+_STALE_QUEUED_ERROR_SUMMARY = "Timed out waiting in QUEUED state (>15m)"
 
 
 class WorkflowDispatchError(Exception):
@@ -121,8 +124,32 @@ async def trigger_crawl_run(
         )
     ).scalars().all()
 
+    now_vn = vn_now()
+    stale_cutoff = now_vn - _STALE_QUEUED_TIMEOUT
+    expired_any = False
+    remaining_active_runs: list[CrawlRun] = []
+
     for active in active_runs:
+        started_vn = to_vn_tz(active.started_at)
+        if active.status == CrawlRunStatus.QUEUED.value and started_vn < stale_cutoff:
+            active.status = CrawlRunStatus.FAILED.value
+            active.finished_at = now_vn
+            active.duration_ms = max(0, int((now_vn - started_vn).total_seconds() * 1000))
+            active.error_summary = _STALE_QUEUED_ERROR_SUMMARY
+            expired_any = True
+            logger.warning(
+                "Auto-expired stale QUEUED crawl_run run_code=%s scope=%s started_at=%s",
+                active.run_code,
+                active.scope_category,
+                started_vn.isoformat(),
+            )
+            continue
+        remaining_active_runs.append(active)
+
+    for active in remaining_active_runs:
         if _scopes_overlap(scope, active.scope_category):
+            if expired_any:
+                await session.commit()
             raise AppError(
                 status_code=status.HTTP_409_CONFLICT,
                 code="CRAWL_RUN_ALREADY_ACTIVE",

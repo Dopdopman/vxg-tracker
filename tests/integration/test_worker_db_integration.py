@@ -650,3 +650,92 @@ async def test_github_dispatch_failure_marks_failed_and_cli_run_id_executes_queu
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_stale_queued_run_auto_expires_and_unblocks_manual_trigger() -> None:
+    """Stale QUEUED CrawlRun (>15m) expires to FAILED so manual triggers are never deadlocked."""
+    engine = create_async_db_engine(_HOST_TEST_DB_URL)
+    session_factory = create_session_factory(engine)
+    created_run_ids: list[uuid.UUID] = []
+
+    try:
+        async with PostgresAdvisoryLock(engine, 908_712_001):
+            now_vn = vn_now()
+            stale_gold_id = uuid.uuid4()
+            stale_fuel_id = uuid.uuid4()
+            created_run_ids.extend([stale_gold_id, stale_fuel_id])
+
+            async with session_factory() as seed_session:
+                seed_session.add(
+                    CrawlRun(
+                        id=stale_gold_id,
+                        run_code=f"test-stale-gold-{stale_gold_id.hex[:8]}",
+                        scope_category=CrawlScope.GOLD.value,
+                        trigger_type=TriggerType.MANUAL_ADMIN.value,
+                        status=CrawlRunStatus.QUEUED.value,
+                        started_at=now_vn - timedelta(minutes=16),
+                    )
+                )
+                await seed_session.commit()
+
+            # 1) Stale GOLD run (>15m) expires cleanly and allows a new GOLD enqueue.
+            async with session_factory() as api_session:
+                triggered = await trigger_crawl_run(api_session, scope=CrawlScope.GOLD)
+            created_run_ids.append(triggered.run_id)
+
+            assert triggered.run_id != stale_gold_id
+            assert triggered.status == CrawlRunStatus.QUEUED
+            assert triggered.scope == CrawlScope.GOLD
+
+            async with session_factory() as verify_session:
+                expired_gold = await verify_session.get(CrawlRun, stale_gold_id)
+                assert expired_gold is not None
+                assert expired_gold.status == CrawlRunStatus.FAILED.value
+                assert expired_gold.error_summary == "Timed out waiting in QUEUED state (>15m)"
+                assert expired_gold.finished_at is not None
+                assert expired_gold.duration_ms is not None
+                assert expired_gold.duration_ms >= 15 * 60 * 1000
+
+            # 2) Even if a fresh (<15m) overlapping run raises 409, any coexisting stale QUEUED
+            #    run encountered during the check is still persisted as FAILED.
+            async with session_factory() as seed_session:
+                seed_session.add(
+                    CrawlRun(
+                        id=stale_fuel_id,
+                        run_code=f"test-stale-fuel-{stale_fuel_id.hex[:8]}",
+                        scope_category=CrawlScope.FUEL.value,
+                        trigger_type=TriggerType.MANUAL_ADMIN.value,
+                        status=CrawlRunStatus.QUEUED.value,
+                        started_at=now_vn - timedelta(minutes=20),
+                    )
+                )
+                await seed_session.commit()
+
+            async with session_factory() as api_session:
+                with pytest.raises(AppError) as exc_info:
+                    await trigger_crawl_run(api_session, scope=CrawlScope.ALL)
+
+            assert exc_info.value.status_code == 409
+            assert exc_info.value.code == "CRAWL_RUN_ALREADY_ACTIVE"
+            assert exc_info.value.details is not None
+            assert exc_info.value.details["active_run_id"] == str(triggered.run_id)
+
+            async with session_factory() as verify_session:
+                expired_fuel = await verify_session.get(CrawlRun, stale_fuel_id)
+                fresh_gold = await verify_session.get(CrawlRun, triggered.run_id)
+                assert expired_fuel is not None
+                assert expired_fuel.status == CrawlRunStatus.FAILED.value
+                assert expired_fuel.error_summary == "Timed out waiting in QUEUED state (>15m)"
+                assert expired_fuel.finished_at is not None
+                assert fresh_gold is not None
+                assert fresh_gold.status == CrawlRunStatus.QUEUED.value
+    finally:
+        if created_run_ids:
+            async with session_factory() as cleanup:
+                await cleanup.execute(
+                    delete(CrawlRun).where(CrawlRun.id.in_(created_run_ids))
+                )
+                await cleanup.commit()
+        await engine.dispose()
+
+
+
