@@ -33,7 +33,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Install Chromium and OS dependencies cleanly in shared path readable by non-root user
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libatomic1 ca-certificates && \
+    apt-get install -y --no-install-recommends libatomic1 libgomp1 ca-certificates && \
     playwright install --with-deps chromium && \
     chmod -R 755 /ms-playwright && \
     rm -rf /var/lib/apt/lists/*

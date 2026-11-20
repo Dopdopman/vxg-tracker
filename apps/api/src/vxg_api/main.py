@@ -14,6 +14,7 @@ from vxg_api.routers.admin import router as admin_router
 from vxg_api.routers.analytics import router as analytics_router
 from vxg_api.routers.audit import router as audit_router
 from vxg_api.routers.catalog import router as catalog_router
+from vxg_api.routers.forecasts import router as forecasts_router
 from vxg_api.routers.health import router as health_router
 from vxg_api.routers.prices import router as prices_router
 from vxg_shared.db.engine import create_async_db_engine, create_session_factory
@@ -56,6 +57,7 @@ def create_app(custom_settings: ApiSettings | None = None) -> FastAPI:
     app.include_router(catalog_router)
     app.include_router(prices_router)
     app.include_router(analytics_router)
+    app.include_router(forecasts_router)
     app.include_router(audit_router)
     app.include_router(admin_router)
     return app

@@ -17,6 +17,10 @@ from vxg_api.schemas.audit import (
     CrawlRunsListResponse,
     SourcesHealthResponse,
 )
+from vxg_api.schemas.forecasts import (
+    AuditForecastsResponse,
+    ForecastEvaluationTypeFilter,
+)
 from vxg_api.services.audit_query import (
     get_audit_summary,
     get_crawl_run_detail,
@@ -24,7 +28,8 @@ from vxg_api.services.audit_query import (
     list_anomalies,
     list_crawl_runs,
 )
-from vxg_shared.enums import AlertStatus, CrawlRunStatus, CrawlScope
+from vxg_api.services.forecast_query import get_audit_forecasts, parse_forecast_horizon
+from vxg_shared.enums import AlertStatus, CommodityCategory, CrawlRunStatus, CrawlScope
 
 router = APIRouter(prefix="/api/v1", tags=["audit"])
 
@@ -101,6 +106,40 @@ async def read_anomalies(
     return await list_anomalies(
         session,
         alert_status=status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/audit/forecasts",
+    response_model=AuditForecastsResponse,
+    responses={422: {"model": ErrorResponse}},
+)
+async def read_audit_forecasts(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    evaluation_type: Annotated[
+        ForecastEvaluationTypeFilter,
+        Query(description="Filter rows by ALL, LIVE (out-of-sample), or BACKTEST (walk-forward)."),
+    ] = ForecastEvaluationTypeFilter.ALL,
+    domain: Annotated[
+        CommodityCategory | None,
+        Query(description="Optional domain filter (GOLD, FUEL, GAS)."),
+    ] = None,
+    horizon: Annotated[
+        str | None,
+        Query(description="Optional horizon filter (T_PLUS_1, T_PLUS_7, NEXT_FUEL_CYCLE, NEXT_GAS_MONTH)."),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AuditForecastsResponse:
+    """Return transparent forecast accuracy telemetry strictly separating LIVE vs BACKTEST."""
+    parsed_horizon = parse_forecast_horizon(horizon)
+    return await get_audit_forecasts(
+        session,
+        evaluation_type=evaluation_type,
+        domain=domain,
+        horizon=parsed_horizon,
         limit=limit,
         offset=offset,
     )

@@ -582,7 +582,16 @@ async def test_openapi_and_cors_headers() -> None:
         "/api/v1/admin/crawl-runs",
     }
     assert expected_paths.issubset(paths)
-    assert not any("forecast" in p.lower() or "predict" in p.lower() for p in paths)
+    phase2_paths = {
+        "/api/v1/prices/history",
+        "/api/v1/analytics/macro",
+        "/api/v1/analytics/news",
+        "/api/v1/forecasts/latest",
+        "/api/v1/forecasts/detail",
+        "/api/v1/audit/forecasts",
+        "/api/v1/admin/forecast-runs",
+    }
+    assert phase2_paths.issubset(paths)
     assert "APIKeyHeader" in spec["components"]["securitySchemes"]
 
     assert cors_resp.status_code == 200

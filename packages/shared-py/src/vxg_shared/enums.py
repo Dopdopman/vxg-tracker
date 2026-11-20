@@ -158,3 +158,8 @@ class PredictedDirection(StrEnum):
     FLAT = "FLAT"
     UNKNOWN = "UNKNOWN"
 
+
+class ForecastEvaluationType(StrEnum):
+    LIVE = "LIVE"
+    BACKTEST = "BACKTEST"
+

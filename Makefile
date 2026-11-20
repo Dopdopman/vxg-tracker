@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate seed test test-integration lint web-build prune-snapshots rollup-daily backfill sync-macro backfill-macro sync-news
+.PHONY: up down logs migrate seed test test-integration lint web-build prune-snapshots rollup-daily backfill sync-macro backfill-macro sync-news run-forecasts evaluate-forecasts backtest-forecasts
 
 up:
 	docker compose up --build -d
@@ -45,3 +45,12 @@ backfill-macro:
 
 sync-news:
 	docker compose exec worker python -m vxg_worker.cli sync-news --hours 72
+
+run-forecasts:
+	docker compose exec worker python -m vxg_worker.cli run-forecasts --scope ALL
+
+evaluate-forecasts:
+	docker compose exec worker python -m vxg_worker.cli evaluate-forecasts
+
+backtest-forecasts:
+	docker compose exec worker python -m vxg_worker.cli backtest-forecasts --scope ALL

@@ -119,6 +119,7 @@ def test_orm_metadata_contains_all_tables_and_indexes() -> None:
         "market_news_signals",
         "price_forecasts",
         "forecast_evaluations",
+        "forecast_runs",
     }
     assert set(Base.metadata.tables.keys()) == expected_tables
 
@@ -142,6 +143,8 @@ def test_orm_metadata_contains_all_tables_and_indexes() -> None:
         "idx_price_forecasts_pending_eval",
         "idx_forecast_evaluations_target_desc",
         "idx_forecast_evaluations_group",
+        "idx_forecast_evaluations_type_target",
+        "idx_forecast_runs_created_desc",
     }
     assert expected_indexes.issubset(all_index_names)
 

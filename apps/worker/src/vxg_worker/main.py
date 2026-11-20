@@ -13,6 +13,7 @@ from vxg_shared.db.engine import create_async_db_engine, create_session_factory
 from vxg_shared.db.models import Source
 from vxg_shared.timezone import VN_TZ_NAME, vn_now
 from vxg_worker.config import WorkerSettings
+from vxg_worker.forecasting.pipeline import poll_queued_forecast_run
 from vxg_worker.runner import CrawlRunner
 from vxg_worker.scheduler import build_worker_scheduler
 
@@ -87,6 +88,15 @@ async def run_worker_daemon() -> None:
                         summary.sources_queried_count,
                         summary.records_verified_count,
                         summary.records_flagged_count,
+                    )
+                f_summary = await poll_queued_forecast_run(engine, session_factory)
+                if f_summary is not None:
+                    logger.info(
+                        "Executed queued forecast run | scope=%s | ready=%d | insufficient=%d | eval=%d",
+                        f_summary.scope,
+                        f_summary.ready_count,
+                        f_summary.insufficient_count,
+                        f_summary.evaluations_inserted,
                     )
             except Exception:
                 logger.exception("Unhandled error during queue poll iteration")

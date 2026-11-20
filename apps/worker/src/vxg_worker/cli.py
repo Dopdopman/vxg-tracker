@@ -6,12 +6,14 @@ import argparse
 import asyncio
 import sys
 import uuid
-from datetime import timedelta
+from datetime import date, timedelta
 
 from vxg_shared.db.engine import create_async_db_engine, create_session_factory
-from vxg_shared.enums import CrawlScope, TriggerType
+from vxg_shared.enums import CrawlScope, ForecastStatus, TriggerType
 from vxg_shared.timezone import vn_today
 from vxg_worker.config import WorkerSettings
+from vxg_worker.forecasting.evaluator import evaluate_due_forecasts
+from vxg_worker.forecasting.pipeline import run_forecast_pipeline
 from vxg_worker.history.orchestrator import BackfillDomain, run_history_backfill
 from vxg_worker.history.rollup import rollup_daily_from_price_records
 from vxg_worker.macro.sync import run_macro_sync
@@ -176,6 +178,60 @@ async def _async_main(argv: list[str] | None = None) -> int:
         help="Force Tier 1 deterministic lexicon scoring only (skip Gemini even if API key is set)",
     )
 
+    run_fc_p = subparsers.add_parser(
+        "run-forecasts",
+        help="Run zero look-ahead econometric forecasts across Gold/Fuel/Gas",
+    )
+    run_fc_p.add_argument(
+        "--scope",
+        choices=[s.value for s in CrawlScope],
+        default=CrawlScope.ALL.value,
+    )
+    run_fc_p.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help="Optional cutoff date YYYY-MM-DD (default: today Asia/Ho_Chi_Minh)",
+    )
+    run_fc_p.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional existing QUEUED ForecastRun UUID to execute in place",
+    )
+    run_fc_p.add_argument(
+        "--with-backtest",
+        action="store_true",
+        help="Also persist walk-forward BACKTEST rows into forecast_evaluations",
+    )
+
+    eval_fc_p = subparsers.add_parser(
+        "evaluate-forecasts",
+        help="Evaluate due LIVE forecast snapshots against realized daily_price_series",
+    )
+    eval_fc_p.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help="Optional evaluation cutoff date YYYY-MM-DD (default: today Asia/Ho_Chi_Minh)",
+    )
+
+    bt_fc_p = subparsers.add_parser(
+        "backtest-forecasts",
+        help="Run expanding-window walk-forward backtests, persist BACKTEST rows, and print summary",
+    )
+    bt_fc_p.add_argument(
+        "--scope",
+        choices=[s.value for s in CrawlScope],
+        default=CrawlScope.ALL.value,
+    )
+    bt_fc_p.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help="Optional evaluation cutoff date YYYY-MM-DD (default: today Asia/Ho_Chi_Minh)",
+    )
+
     args = parser.parse_args(argv)
     settings = WorkerSettings()
     engine = create_async_db_engine(settings.async_database_url)
@@ -267,6 +323,66 @@ async def _async_main(argv: list[str] | None = None) -> int:
                 f"by_domain={summary_news.by_domain} gemini={summary_news.gemini_stats} "
                 f"errors={summary_news.errors}"
             )
+            return 0
+
+        if args.command == "evaluate-forecasts":
+            as_of_val = date.fromisoformat(args.as_of.strip()) if args.as_of and args.as_of.strip() else None
+            async with session_factory() as session:
+                eval_sum = await evaluate_due_forecasts(session, as_of_date=as_of_val)
+                await session.commit()
+            print(
+                f"Forecast evaluation completed: as_of={eval_sum.as_of_date.isoformat()} "
+                f"due={eval_sum.due_candidates} inserted={eval_sum.evaluated_inserted} "
+                f"waiting_actual={eval_sum.waiting_actual_price}"
+            )
+            return 0
+
+        if args.command in ("run-forecasts", "backtest-forecasts"):
+            as_of_val = date.fromisoformat(args.as_of.strip()) if args.as_of and args.as_of.strip() else None
+            is_backtest_cmd = args.command == "backtest-forecasts"
+            fc_run_id = (
+                uuid.UUID(args.run_id.strip())
+                if not is_backtest_cmd and getattr(args, "run_id", None) and str(args.run_id).strip()
+                else None
+            )
+            with_bt = is_backtest_cmd or bool(getattr(args, "with_backtest", False))
+            fc_sum = await run_forecast_pipeline(
+                engine,
+                session_factory,
+                scope=CrawlScope(args.scope),
+                as_of_date=as_of_val,
+                existing_run_id=fc_run_id,
+                persist_backtest=with_bt,
+                run_evaluation_first=(args.command == "run-forecasts"),
+            )
+            print(
+                f"\nForecast pipeline: cmd={args.command} scope={fc_sum.scope} as_of={fc_sum.as_of_date.isoformat()} "
+                f"total={fc_sum.total_snapshots} ready={fc_sum.ready_count} "
+                f"insufficient={fc_sum.insufficient_count} eval_live={fc_sum.evaluations_inserted} "
+                f"backtest_rows={fc_sum.backtest_rows_upserted} duration_ms={fc_sum.duration_ms}"
+            )
+            print("-" * 124)
+            print(
+                f"{'COMMODITY':<22} {'LOC':<7} {'HORIZON':<16} {'MODEL':<24} "
+                f"{'POINT_VND':>12} {'DIR':<5} {'CONF':>5} {'MAE_VND':>10} {'MAPE%':>7} {'NAIVE%':>7} {'DIR%':>6}"
+            )
+            print("-" * 124)
+            for out in fc_sum.outputs:
+                if out.status != ForecastStatus.READY:
+                    continue
+                bt = out.drivers_json.get("backtest") or {}
+                mae_s = f"{bt.get('mae_vnd'):,}" if bt.get("mae_vnd") is not None else "-"
+                mape_s = f"{bt.get('mape_pct'):.2f}" if bt.get("mape_pct") is not None else "-"
+                n_mape_s = f"{bt.get('naive_mape_pct'):.2f}" if bt.get("naive_mape_pct") is not None else "-"
+                dir_s = f"{bt.get('directional_accuracy_pct'):.1f}" if bt.get("directional_accuracy_pct") is not None else "-"
+                pt_s = f"{out.point_estimate_vnd:,}" if out.point_estimate_vnd is not None else "-"
+                conf_s = f"{float(out.confidence_score):.2f}" if out.confidence_score is not None else "-"
+                print(
+                    f"{out.commodity_code:<22} {out.location_code:<7} {out.horizon.value:<16} "
+                    f"{out.model_version:<24} {pt_s:>12} {out.predicted_direction.value:<5} "
+                    f"{conf_s:>5} {mae_s:>10} {mape_s:>7} {n_mape_s:>7} {dir_s:>6}"
+                )
+            print("-" * 124 + "\n")
             return 0
 
         if args.command == "enqueue":

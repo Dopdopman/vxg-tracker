@@ -6,6 +6,14 @@ on:
     - cron: "15 17 * * *"
   workflow_dispatch:
     inputs:
+      task_type:
+        description: "Loại tác vụ chạy tay (crawl = cào giá, forecast = dự báo & chấm điểm)"
+        required: true
+        type: choice
+        default: "crawl"
+        options:
+          - "crawl"
+          - "forecast"
       scope:
         description: "Phạm vi thu thập dữ liệu (ALL, GOLD, FUEL, GAS)"
         required: true
@@ -17,7 +25,7 @@ on:
           - "FUEL"
           - "GAS"
       run_id:
-        description: "UUID của CrawlRun QUEUED cần thực thi (tùy chọn)"
+        description: "UUID của CrawlRun hoặc ForecastRun QUEUED cần thực thi (tùy chọn)"
         required: false
         type: string
         default: ""
@@ -33,9 +41,9 @@ env:
 
 jobs:
   crawl-worker:
-    name: Run Scraper Worker & 6-Layer Validation
+    name: Run Scraper, Forecasting & Evaluation Worker
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -79,6 +87,7 @@ jobs:
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
           ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
           ALERT_DISCORD_WEBHOOK_URL: ${{ secrets.ALERT_DISCORD_WEBHOOK_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PRICE_SPIKE_THRESHOLD_PCT: "15.0"
           SCRAPER_HTTP_PROXY: ${{ secrets.SCRAPER_HTTP_PROXY }}
         run: |
@@ -88,15 +97,31 @@ jobs:
           fi
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TASK_TYPE="${{ inputs.task_type || 'crawl' }}"
             SCOPE="${{ inputs.scope }}"
             RUN_ID="${{ inputs.run_id }}"
-            if [ -n "$RUN_ID" ]; then
-              .venv/bin/python -m vxg_worker.cli run --run-id "$RUN_ID" --scope "$SCOPE" --trigger MANUAL_ADMIN
+            if [ "$TASK_TYPE" = "forecast" ]; then
+              .venv/bin/python -m vxg_worker.cli sync-macro --days 7 || true
+              .venv/bin/python -m vxg_worker.cli sync-news --hours 72 || true
+              .venv/bin/python -m vxg_worker.cli evaluate-forecasts || true
+              if [ -n "$RUN_ID" ]; then
+                .venv/bin/python -m vxg_worker.cli run-forecasts --run-id "$RUN_ID" --scope "$SCOPE"
+              else
+                .venv/bin/python -m vxg_worker.cli run-forecasts --scope "$SCOPE"
+              fi
             else
-              .venv/bin/python -m vxg_worker.cli run --scope "$SCOPE" --trigger MANUAL_ADMIN
+              if [ -n "$RUN_ID" ]; then
+                .venv/bin/python -m vxg_worker.cli run --run-id "$RUN_ID" --scope "$SCOPE" --trigger MANUAL_ADMIN
+              else
+                .venv/bin/python -m vxg_worker.cli run --scope "$SCOPE" --trigger MANUAL_ADMIN
+              fi
             fi
           else
             .venv/bin/python -m vxg_worker.cli run --scope ALL --trigger SCHEDULED
+            .venv/bin/python -m vxg_worker.cli sync-macro --days 14 || true
+            .venv/bin/python -m vxg_worker.cli sync-news --hours 72 || true
+            .venv/bin/python -m vxg_worker.cli evaluate-forecasts || true
+            .venv/bin/python -m vxg_worker.cli run-forecasts --scope ALL || true
             .venv/bin/python -m vxg_worker.cli prune-snapshots --retention-days 90
           fi
 

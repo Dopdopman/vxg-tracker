@@ -656,6 +656,12 @@ class ForecastEvaluation(Base):
         CheckConstraint("pct_error >= 0", name="pct_error_non_negative"),
         CheckConstraint("predicted_direction IN ('UP', 'DOWN', 'FLAT')", name="predicted_direction"),
         CheckConstraint("actual_direction IN ('UP', 'DOWN', 'FLAT')", name="actual_direction"),
+        CheckConstraint("evaluation_type IN ('LIVE', 'BACKTEST')", name="evaluation_type"),
+        CheckConstraint(
+            "(evaluation_type = 'LIVE' AND forecast_id IS NOT NULL) "
+            "OR (evaluation_type = 'BACKTEST' AND forecast_id IS NULL)",
+            name="eval_type_forecast_link",
+        ),
         Index(
             "idx_forecast_evaluations_target_desc",
             text("target_date DESC"),
@@ -667,13 +673,30 @@ class ForecastEvaluation(Base):
             "horizon_type",
             text("target_date DESC"),
         ),
+        Index(
+            "idx_forecast_evaluations_type_target",
+            "evaluation_type",
+            text("target_date DESC"),
+            text("evaluated_at DESC"),
+        ),
+        Index(
+            "uq_forecast_eval_backtest_key",
+            "commodity_id",
+            "location_id",
+            "forecast_date",
+            "target_date",
+            "horizon_type",
+            "model_version",
+            unique=True,
+            postgresql_where=text("evaluation_type = 'BACKTEST'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    forecast_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("price_forecasts.id", ondelete="CASCADE"), nullable=False
+    forecast_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("price_forecasts.id", ondelete="CASCADE"), nullable=True
     )
     commodity_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("commodities.id", ondelete="RESTRICT"), nullable=False
@@ -683,11 +706,16 @@ class ForecastEvaluation(Base):
     )
     horizon_type: Mapped[str] = mapped_column(String(24), nullable=False)
     model_version: Mapped[str] = mapped_column(String(48), nullable=False)
+    evaluation_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'LIVE'")
+    )
     forecast_date: Mapped[date] = mapped_column(Date, nullable=False)
     target_date: Mapped[date] = mapped_column(Date, nullable=False)
     actual_date: Mapped[date] = mapped_column(Date, nullable=False)
     baseline_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
     predicted_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lower_bound_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    upper_bound_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     actual_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
     abs_error_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
     pct_error: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
@@ -699,7 +727,45 @@ class ForecastEvaluation(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    forecast: Mapped[PriceForecast] = relationship()
+    forecast: Mapped[PriceForecast | None] = relationship()
     commodity: Mapped[Commodity] = relationship()
     location: Mapped[Location] = relationship()
+
+
+class ForecastRun(Base):
+    """Execution telemetry and queue state for scheduled and admin-triggered forecast jobs."""
+
+    __tablename__ = "forecast_runs"
+    __table_args__ = (
+        CheckConstraint("scope_category IN ('ALL', 'GOLD', 'FUEL', 'GAS')", name="scope_category"),
+        CheckConstraint("trigger_type IN ('SCHEDULED', 'MANUAL_ADMIN', 'RETRY')", name="trigger_type"),
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'PARTIAL_SUCCESS', 'FAILED')",
+            name="status",
+        ),
+        Index("idx_forecast_runs_created_desc", text("created_at DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    run_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    scope_category: Mapped[str] = mapped_column(String(16), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    forecasts_generated: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    evaluations_created: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
