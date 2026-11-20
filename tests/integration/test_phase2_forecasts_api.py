@@ -131,6 +131,7 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
     backup_forecasts: list[dict[str, Any]] = []
     backup_evals: list[dict[str, Any]] = []
     pnj_id = 0
+    sjc_id = 0
     hcm_id = 0
     gold_ids: list[int] = []
 
@@ -139,8 +140,10 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
             # Verify Migration 0004 check constraint blocks LIVE evaluation without forecast_id
             catalog = await load_catalog_lookup(session)
             pnj = catalog.commodities_by_code["GOLD_SJC_BAR_PNJ"]
+            sjc = catalog.commodities_by_code["GOLD_SJC_BAR_SJC"]
             hcm = catalog.locations_by_code["HCM"]
             pnj_id = int(pnj.id)
+            sjc_id = int(sjc.id)
             hcm_id = int(hcm.id)
             gold_ids = [
                 int(c.id) for c in catalog.commodities_by_code.values() if c.category == "GOLD"
@@ -162,13 +165,21 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
                         {"cid": pnj_id, "lid": hcm_id, "d1": due_forecast_date, "d2": due_target_date},
                     )
 
-            # Backup pre-existing rows touched on PNJ/HCM and today's GOLD forecasts/evals
+            # Backup pre-existing rows touched on PNJ/HCM, SJC/HCM today, and GOLD forecasts/evals
             old_daily = (
                 await session.execute(
                     select(DailyPriceSeries).where(
-                        DailyPriceSeries.commodity_id == pnj_id,
                         DailyPriceSeries.location_id == hcm_id,
-                        DailyPriceSeries.price_date.in_(pnj_dates),
+                        (
+                            (
+                                (DailyPriceSeries.commodity_id == pnj_id)
+                                & DailyPriceSeries.price_date.in_(pnj_dates)
+                            )
+                            | (
+                                (DailyPriceSeries.commodity_id == sjc_id)
+                                & (DailyPriceSeries.price_date == today)
+                            )
+                        ),
                     )
                 )
             ).scalars().all()
@@ -244,12 +255,20 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
             for ev in old_ev:
                 backup_evals.append(_snapshot_eval_row(ev))
 
-            # Seed deterministic daily series for PNJ HCM + macro series so test passes in empty CI DB too
+            # Seed deterministic daily series for PNJ HCM + SJC HCM + macro series so test passes in empty CI DB too
             await session.execute(
                 delete(DailyPriceSeries).where(
-                    DailyPriceSeries.commodity_id == pnj_id,
                     DailyPriceSeries.location_id == hcm_id,
-                    DailyPriceSeries.price_date.in_(pnj_dates),
+                    (
+                        (
+                            (DailyPriceSeries.commodity_id == pnj_id)
+                            & DailyPriceSeries.price_date.in_(pnj_dates)
+                        )
+                        | (
+                            (DailyPriceSeries.commodity_id == sjc_id)
+                            & (DailyPriceSeries.price_date == today)
+                        )
+                    ),
                 )
             )
             daily_seed = [
@@ -268,6 +287,21 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
                 }
                 for idx, d in enumerate(pnj_dates)
             ]
+            daily_seed.append(
+                {
+                    "commodity_id": sjc_id,
+                    "location_id": hcm_id,
+                    "price_date": today,
+                    "buy_price_vnd": 129_000_000,
+                    "sell_price_vnd": 132_000_000,
+                    "retail_price_vnd": None,
+                    "reference_price_vnd": 132_000_000,
+                    "series_origin": SeriesOrigin.BACKFILL.value,
+                    "is_adjustment_day": True,
+                    "source_code": "M9TEST_SERIES",
+                    "source_url": "https://example.test/sjc",
+                }
+            )
             await session.execute(pg_insert(DailyPriceSeries).values(daily_seed))
 
             macro_seed: list[dict[str, Any]] = []
@@ -278,6 +312,7 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
                     (MacroIndicatorCode.BRENT_USD.value, "USD_PER_BBL", Decimal(str(88.0 + (idx % 8) * 0.4))),
                     (MacroIndicatorCode.WTI_USD.value, "USD_PER_BBL", Decimal(str(83.0 + (idx % 8) * 0.3))),
                     (MacroIndicatorCode.USD_VND_VCB.value, "VND_PER_USD", Decimal("25960.0000")),
+                    (MacroIndicatorCode.USD_VND_MARKET.value, "VND_PER_USD", Decimal("25720.0000")),
                 ):
                     macro_seed.append(
                         {
@@ -380,6 +415,11 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
             assert detail_json["forecast"]["status"] == "READY"
             assert len(detail_json["history_points"]) >= 25
             assert len(detail_json["macro_highlights"]) == 3
+            assert {h["key"] for h in detail_json["macro_highlights"]} == {
+                "XAU_USD",
+                "USD_VND_VCB",
+                "SJC_WORLD_SPREAD",
+            }
             assert detail_json["backtest_summary"]["sample_count"] > 0
 
             bad_zone = await client.get(
@@ -497,12 +537,20 @@ async def test_forecast_pipeline_evaluations_separation_and_all_apis() -> None:
             if backup_evals:
                 await cleanup.execute(pg_insert(ForecastEvaluation).values(backup_evals))
 
-            if pnj_id and hcm_id:
+            if pnj_id and sjc_id and hcm_id:
                 await cleanup.execute(
                     delete(DailyPriceSeries).where(
-                        DailyPriceSeries.commodity_id == pnj_id,
                         DailyPriceSeries.location_id == hcm_id,
-                        DailyPriceSeries.price_date.in_(pnj_dates),
+                        (
+                            (
+                                (DailyPriceSeries.commodity_id == pnj_id)
+                                & DailyPriceSeries.price_date.in_(pnj_dates)
+                            )
+                            | (
+                                (DailyPriceSeries.commodity_id == sjc_id)
+                                & (DailyPriceSeries.price_date == today)
+                            )
+                        ),
                     )
                 )
             if backup_daily:

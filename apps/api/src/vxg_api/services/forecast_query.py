@@ -431,6 +431,8 @@ async def get_forecast_detail(
                     note_vi=f"Quy đổi {sp.world_vnd_per_tael:,} VND/lượng ({sp.fx_source})",
                 )
             )
+        else:
+            _add_macro_card(MacroIndicatorCode.DXY, "Chỉ số USD Index (DXY)")
     else:
         _add_macro_card(MacroIndicatorCode.BRENT_USD, "Dầu thô Brent (USD/thùng)")
         _add_macro_card(MacroIndicatorCode.WTI_USD, "Dầu thô WTI (USD/thùng)")
