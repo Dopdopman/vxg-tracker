@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       domain:
-        description: "Phạm vi backfill lịch sử (ALL, GOLD, FUEL, GAS)"
+        description: "Phạm vi backfill lịch sử (ALL, GOLD, FUEL, GAS, MACRO)"
         required: true
         type: choice
         default: "ALL"
@@ -13,6 +13,7 @@ on:
           - "GOLD"
           - "FUEL"
           - "GAS"
+          - "MACRO"
       months:
         description: "Số tháng lịch sử cần nạp (12, 18, 24)"
         required: true
@@ -65,6 +66,11 @@ jobs:
             echo "ERROR: GitHub Actions secret DATABASE_URL is not configured."
             exit 1
           fi
-          .venv/bin/python -m vxg_worker.cli backfill-history --domain "${{ inputs.domain }}" --months "${{ inputs.months }}"
-          .venv/bin/python -m vxg_worker.cli rollup-daily
+          if [ "${{ inputs.domain }}" != "MACRO" ]; then
+            .venv/bin/python -m vxg_worker.cli backfill-history --domain "${{ inputs.domain }}" --months "${{ inputs.months }}"
+            .venv/bin/python -m vxg_worker.cli rollup-daily
+          fi
+          if [ "${{ inputs.domain }}" = "ALL" ] || [ "${{ inputs.domain }}" = "MACRO" ]; then
+            .venv/bin/python -m vxg_worker.cli backfill-macro --months "${{ inputs.months }}"
+          fi
 

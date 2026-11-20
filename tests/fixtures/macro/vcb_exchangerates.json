@@ -1,0 +1,22 @@
+{
+  "Count": 2,
+  "Date": "2026-11-20T00:00:00",
+  "UpdatedDate": "2026-11-20T11:14:11+07:00",
+  "Data": [
+    {
+      "currencyName": "EURO",
+      "currencyCode": "EUR",
+      "cash": "27560.86",
+      "transfer": "27839.25",
+      "sell": "29014.78"
+    },
+    {
+      "currencyName": "US DOLLAR",
+      "currencyCode": "USD",
+      "cash": "25550.00",
+      "transfer": "25580.00",
+      "sell": "25960.00"
+    }
+  ]
+}
+

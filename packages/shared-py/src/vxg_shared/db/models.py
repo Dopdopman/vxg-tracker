@@ -476,7 +476,7 @@ class MacroIndicator(Base):
             "indicator_code", "indicator_date", name="uq_macro_indicators_code_date"
         ),
         CheckConstraint(
-            "indicator_code IN ('XAU_USD', 'BRENT_USD', 'WTI_USD', 'DXY', 'USD_VND_VCB')",
+            "indicator_code IN ('XAU_USD', 'BRENT_USD', 'WTI_USD', 'DXY', 'USD_VND_VCB', 'USD_VND_MARKET')",
             name="indicator_code",
         ),
         CheckConstraint("value > 0", name="value_positive"),

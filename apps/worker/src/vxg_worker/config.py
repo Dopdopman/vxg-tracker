@@ -46,6 +46,18 @@ class WorkerSettings(SharedSettings):
         validation_alias="SNAPSHOT_RETENTION_DAYS",
     )
     healthchecks_ping_url: str | None = Field(default=None, validation_alias="HEALTHCHECKS_PING_URL")
+    gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.0-flash", validation_alias="GEMINI_MODEL")
+    gemini_max_articles_per_run: int = Field(
+        default=6,
+        ge=0,
+        le=20,
+        validation_alias="GEMINI_MAX_ARTICLES_PER_RUN",
+    )
+
+    @property
+    def cleaned_gemini_api_key(self) -> str | None:
+        return _clean_optional(self.gemini_api_key)
 
     @property
     def proxy_url(self) -> str | None:

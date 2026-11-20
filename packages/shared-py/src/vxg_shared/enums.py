@@ -119,6 +119,7 @@ class MacroIndicatorCode(StrEnum):
     WTI_USD = "WTI_USD"
     DXY = "DXY"
     USD_VND_VCB = "USD_VND_VCB"
+    USD_VND_MARKET = "USD_VND_MARKET"
 
 
 class NewsDomain(StrEnum):

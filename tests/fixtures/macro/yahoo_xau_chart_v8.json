@@ -1,0 +1,34 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "USD",
+          "symbol": "GC=F",
+          "exchangeName": "CMX",
+          "exchangeTimezoneName": "America/New_York",
+          "regularMarketPrice": 3910.4,
+          "regularMarketTime": 1795186800
+        },
+        "timestamp": [
+          1794805200,
+          1794891600,
+          1794978000,
+          1795064400,
+          1795150800
+        ],
+        "indicators": {
+          "quote": [
+            {
+              "open": [3840.0, 3855.0, 3750.0, 3695.0, 3900.0],
+              "high": [3870.0, 3880.0, 3860.0, 3745.0, 3920.0],
+              "low": [3835.0, 3842.0, 3730.0, 3670.0, 3890.0],
+              "close": [3853.0, 3864.2, 999999.0, 3685.5, null]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

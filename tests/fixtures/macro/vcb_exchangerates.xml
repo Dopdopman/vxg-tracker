@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ExrateList>
+  <DateTime>11/20/2026 11:57:03 AM</DateTime>
+  <Exrate CurrencyCode="AUD" CurrencyName="AUSTRALIAN DOLLAR   " Buy="16,730.87" Transfer="16,899.87" Sell="17,441.64" />
+  <Exrate CurrencyCode="USD" CurrencyName="US DOLLAR           " Buy="25,550.00" Transfer="25,580.00" Sell="25,960.00" />
+</ExrateList>
+

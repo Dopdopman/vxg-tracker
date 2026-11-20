@@ -14,6 +14,8 @@ from vxg_shared.timezone import vn_today
 from vxg_worker.config import WorkerSettings
 from vxg_worker.history.orchestrator import BackfillDomain, run_history_backfill
 from vxg_worker.history.rollup import rollup_daily_from_price_records
+from vxg_worker.macro.sync import run_macro_sync
+from vxg_worker.news.sync import run_news_sync
 from vxg_worker.runner import CrawlRunner, CrawlRunSummary, enqueue_crawl_run
 from vxg_worker.storage.snapshots import prune_expired_snapshots
 
@@ -130,6 +132,50 @@ async def _async_main(argv: list[str] | None = None) -> int:
         help="History window in calendar months (default: 24)",
     )
 
+    sync_macro_p = subparsers.add_parser(
+        "sync-macro",
+        help="Sync recent daily macroeconomic indicators (Yahoo Chart v8 + Vietcombank USD/VND)",
+    )
+    sync_macro_p.add_argument(
+        "--days",
+        type=int,
+        default=14,
+        help="Recent calendar days window for Vietcombank FX & short macro refresh (default: 14)",
+    )
+
+    backfill_macro_p = subparsers.add_parser(
+        "backfill-macro",
+        help="Backfill 12-24+ months of Yahoo macro series + bounded recent Vietcombank FX window",
+    )
+    backfill_macro_p.add_argument(
+        "--months",
+        type=int,
+        default=24,
+        help="Macro history window in months (default: 24)",
+    )
+    backfill_macro_p.add_argument(
+        "--vcb-days",
+        type=int,
+        default=45,
+        help="Recent Vietcombank FX backfill window in days (capped at 60, default: 45)",
+    )
+
+    sync_news_p = subparsers.add_parser(
+        "sync-news",
+        help="Fetch RSS financial feeds, score deterministically, and optionally summarize via Gemini",
+    )
+    sync_news_p.add_argument(
+        "--hours",
+        type=int,
+        default=72,
+        help="Published lookback window in hours (default: 72)",
+    )
+    sync_news_p.add_argument(
+        "--no-gemini",
+        action="store_true",
+        help="Force Tier 1 deterministic lexicon scoring only (skip Gemini even if API key is set)",
+    )
+
     args = parser.parse_args(argv)
     settings = WorkerSettings()
     engine = create_async_db_engine(settings.async_database_url)
@@ -171,6 +217,55 @@ async def _async_main(argv: list[str] | None = None) -> int:
                 f"History backfill completed: domain={summary_bf.domain} "
                 f"months={summary_bf.months} duration_ms={summary_bf.duration_ms} "
                 f"stats={summary_bf.domain_stats} rollup_rows={summary_bf.rollup_rows}"
+            )
+            return 0
+
+        if args.command == "sync-macro":
+            summary_macro = await run_macro_sync(
+                engine,
+                session_factory,
+                mode="sync",
+                sync_days=max(1, min(int(args.days), 60)),
+            )
+            print(
+                f"Macro sync completed: mode={summary_macro.mode} "
+                f"duration_ms={summary_macro.duration_ms} "
+                f"upserted={summary_macro.upserted_by_indicator} "
+                f"errors={summary_macro.errors}"
+            )
+            return 0
+
+        if args.command == "backfill-macro":
+            summary_macro_bf = await run_macro_sync(
+                engine,
+                session_factory,
+                mode="backfill",
+                months=max(1, int(args.months)),
+                vcb_days=max(1, min(int(args.vcb_days), 60)),
+            )
+            print(
+                f"Macro backfill completed: mode={summary_macro_bf.mode} "
+                f"months={args.months} duration_ms={summary_macro_bf.duration_ms} "
+                f"upserted={summary_macro_bf.upserted_by_indicator} "
+                f"errors={summary_macro_bf.errors}"
+            )
+            return 0
+
+        if args.command == "sync-news":
+            summary_news = await run_news_sync(
+                engine,
+                session_factory,
+                settings=settings,
+                hours=max(1, int(args.hours)),
+                enable_gemini=not bool(args.no_gemini),
+            )
+            print(
+                f"News sync completed: hours={summary_news.hours} "
+                f"duration_ms={summary_news.duration_ms} feeds_ok={summary_news.feeds_ok} "
+                f"feeds_failed={summary_news.feeds_failed} raw_items={summary_news.raw_items} "
+                f"relevant={summary_news.relevant_items} inserted={summary_news.inserted_count} "
+                f"by_domain={summary_news.by_domain} gemini={summary_news.gemini_stats} "
+                f"errors={summary_news.errors}"
             )
             return 0
 
