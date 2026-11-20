@@ -1,0 +1,70 @@
+name: Backfill Historical Price Series
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Phạm vi backfill lịch sử (ALL, GOLD, FUEL, GAS)"
+        required: true
+        type: choice
+        default: "ALL"
+        options:
+          - "ALL"
+          - "GOLD"
+          - "FUEL"
+          - "GAS"
+      months:
+        description: "Số tháng lịch sử cần nạp (12, 18, 24)"
+        required: true
+        type: choice
+        default: "24"
+        options:
+          - "12"
+          - "18"
+          - "24"
+
+concurrency:
+  group: backfill-history
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Ho_Chi_Minh
+  APP_ENV: production
+
+jobs:
+  backfill-history:
+    name: Run Phase 2 Historical Price Backfill
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install shared & worker Python dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python \
+            -e ./packages/shared-py \
+            -e ./apps/worker
+
+      - name: Execute historical backfill & daily rollup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ERROR: GitHub Actions secret DATABASE_URL is not configured."
+            exit 1
+          fi
+          .venv/bin/python -m vxg_worker.cli backfill-history --domain "${{ inputs.domain }}" --months "${{ inputs.months }}"
+          .venv/bin/python -m vxg_worker.cli rollup-daily
+

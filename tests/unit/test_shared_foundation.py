@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -103,7 +104,7 @@ def test_settings_database_url_normalization() -> None:
     assert s3.sync_database_url == "postgresql+psycopg://sync_user:sync_pass@host:5432/sync_db"
 
 
-def test_orm_metadata_contains_all_eight_tables_and_indexes() -> None:
+def test_orm_metadata_contains_all_tables_and_indexes() -> None:
     expected_tables = {
         "locations",
         "commodities",
@@ -113,6 +114,11 @@ def test_orm_metadata_contains_all_eight_tables_and_indexes() -> None:
         "crawl_source_logs",
         "price_records",
         "anomaly_alerts",
+        "daily_price_series",
+        "macro_indicators",
+        "market_news_signals",
+        "price_forecasts",
+        "forecast_evaluations",
     }
     assert set(Base.metadata.tables.keys()) == expected_tables
 
@@ -127,8 +133,29 @@ def test_orm_metadata_contains_all_eight_tables_and_indexes() -> None:
         "idx_price_records_timeseries",
         "idx_price_records_crawl_run",
         "idx_anomaly_alerts_open",
+        "idx_daily_price_series_lookup",
+        "idx_daily_price_series_adj",
+        "idx_macro_indicators_code_date_desc",
+        "idx_market_news_domain_pub_desc",
+        "idx_market_news_impact_pub_desc",
+        "idx_price_forecasts_latest",
+        "idx_price_forecasts_pending_eval",
+        "idx_forecast_evaluations_target_desc",
+        "idx_forecast_evaluations_group",
     }
     assert expected_indexes.issubset(all_index_names)
+
+
+def test_render_free_packages_exclude_ml_dependencies() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    for pyproject_rel in (
+        "packages/shared-py/pyproject.toml",
+        "apps/api/pyproject.toml",
+    ):
+        text = (repo_root / pyproject_rel).read_text(encoding="utf-8").lower()
+        assert "numpy" not in text
+        assert "scikit-learn" not in text
+        assert "sklearn" not in text
 
 
 def test_catalog_seed_integrity_no_fake_prices() -> None:

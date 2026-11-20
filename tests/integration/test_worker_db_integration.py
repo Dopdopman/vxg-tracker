@@ -21,6 +21,7 @@ from vxg_shared.db.models import (
     Commodity,
     CrawlRun,
     CrawlSourceLog,
+    DailyPriceSeries,
     Location,
     PriceRecord,
     RawEvidenceSnapshot,
@@ -46,6 +47,7 @@ from vxg_worker.adapters.gold.sjc_json import CAFEF_SJC_FALLBACK_URL, SJC_WAF_FA
 from vxg_worker.config import WorkerSettings
 from vxg_worker.fetcher.two_tier import TwoTierFetcher
 from vxg_worker.fetcher.types import FetcherTier, FetchResult
+from vxg_worker.history.rollup import rollup_daily_from_price_records
 from vxg_worker.locks import PostgresAdvisoryLock
 from vxg_worker.persistence import get_latest_verified_price
 from vxg_worker.runner import CrawlRunner, enqueue_crawl_run
@@ -321,7 +323,19 @@ async def test_crawl_runner_quarantine_idempotency_and_telemetry_cleanup() -> No
                     delete(AnomalyAlert).where(AnomalyAlert.crawl_run_id.in_(created_run_ids))
                 )
                 await cleanup.execute(
+                    delete(DailyPriceSeries).where(
+                        DailyPriceSeries.source_record_id.in_(
+                            select(PriceRecord.id).where(
+                                PriceRecord.crawl_run_id.in_(created_run_ids)
+                            )
+                        )
+                    )
+                )
+                await cleanup.execute(
                     delete(PriceRecord).where(PriceRecord.crawl_run_id.in_(created_run_ids))
+                )
+                await rollup_daily_from_price_records(
+                    cleanup, since_date=vn_today() - timedelta(days=5)
                 )
                 await cleanup.execute(
                     delete(CrawlSourceLog).where(
@@ -632,7 +646,19 @@ async def test_github_dispatch_failure_marks_failed_and_cli_run_id_executes_queu
                     delete(AnomalyAlert).where(AnomalyAlert.crawl_run_id.in_(created_run_ids))
                 )
                 await cleanup.execute(
+                    delete(DailyPriceSeries).where(
+                        DailyPriceSeries.source_record_id.in_(
+                            select(PriceRecord.id).where(
+                                PriceRecord.crawl_run_id.in_(created_run_ids)
+                            )
+                        )
+                    )
+                )
+                await cleanup.execute(
                     delete(PriceRecord).where(PriceRecord.crawl_run_id.in_(created_run_ids))
+                )
+                await rollup_daily_from_price_records(
+                    cleanup, since_date=vn_today() - timedelta(days=5)
                 )
                 await cleanup.execute(
                     delete(CrawlSourceLog).where(CrawlSourceLog.crawl_run_id.in_(created_run_ids))
@@ -924,7 +950,19 @@ async def test_sjc_waf_fallback_on_403_persists_cafef_snapshot_and_audit_evidenc
                     delete(AnomalyAlert).where(AnomalyAlert.crawl_run_id.in_(created_run_ids))
                 )
                 await cleanup.execute(
+                    delete(DailyPriceSeries).where(
+                        DailyPriceSeries.source_record_id.in_(
+                            select(PriceRecord.id).where(
+                                PriceRecord.crawl_run_id.in_(created_run_ids)
+                            )
+                        )
+                    )
+                )
+                await cleanup.execute(
                     delete(PriceRecord).where(PriceRecord.crawl_run_id.in_(created_run_ids))
+                )
+                await rollup_daily_from_price_records(
+                    cleanup, since_date=vn_today() - timedelta(days=5)
                 )
                 await cleanup.execute(
                     delete(CrawlSourceLog).where(CrawlSourceLog.crawl_run_id.in_(created_run_ids))

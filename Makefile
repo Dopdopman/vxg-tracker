@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate seed test test-integration lint web-build prune-snapshots
+.PHONY: up down logs migrate seed test test-integration lint web-build prune-snapshots rollup-daily backfill
 
 up:
 	docker compose up --build -d
@@ -30,3 +30,9 @@ web-build:
 
 prune-snapshots:
 	docker compose exec worker python -m vxg_worker.cli prune-snapshots
+
+rollup-daily:
+	docker compose exec worker python -m vxg_worker.cli rollup-daily
+
+backfill:
+	docker compose exec worker python -m vxg_worker.cli backfill-history --domain ALL --months 24

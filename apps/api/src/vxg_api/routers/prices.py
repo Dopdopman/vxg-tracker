@@ -11,8 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vxg_api.deps import get_db_session
 from vxg_api.errors import ErrorResponse
 from vxg_api.schemas.common import CityCode
-from vxg_api.schemas.prices import LatestPricesResponse, PriceEvidenceResponse
-from vxg_api.services.price_query import get_latest_prices, get_price_evidence
+from vxg_api.schemas.prices import (
+    HistoryLocationCode,
+    HistoryRange,
+    LatestPricesResponse,
+    PriceEvidenceResponse,
+    PriceHistoryResponse,
+)
+from vxg_api.services.price_query import get_latest_prices, get_price_evidence, get_price_history
 from vxg_shared.enums import CommodityCategory
 
 router = APIRouter(prefix="/api/v1/prices", tags=["prices"])
@@ -36,6 +42,38 @@ async def read_latest_prices(
 ) -> LatestPricesResponse:
     """Return latest VERIFIED/CROSS_CHECKED prices, resolving FUEL to city fuel zones."""
     return await get_latest_prices(session, location=location, domain=domain)
+
+
+@router.get(
+    "/history",
+    response_model=PriceHistoryResponse,
+    responses={
+        404: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+    },
+)
+async def read_price_history(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    commodity_code: Annotated[
+        str,
+        Query(min_length=2, max_length=64, description="Canonical commodity code (e.g. GOLD_SJC_BAR_SJC)."),
+    ],
+    location: Annotated[
+        HistoryLocationCode,
+        Query(description="City code (HN, DN, HCM) or FUEL zone (VUNG_1, VUNG_2)."),
+    ] = HistoryLocationCode.HCM,
+    range: Annotated[
+        HistoryRange,
+        Query(description="Historical lookback window: 30d, 90d, 1y, or 2y."),
+    ] = HistoryRange.D90,
+) -> PriceHistoryResponse:
+    """Return clean daily historical time-series from `daily_price_series` (Phase 2)."""
+    return await get_price_history(
+        session,
+        commodity_code=commodity_code,
+        location=location,
+        history_range=range,
+    )
 
 
 @router.get(

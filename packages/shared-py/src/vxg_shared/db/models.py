@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.0 ORM definitions for all 8 vxg-tracker PostgreSQL tables."""
+"""SQLAlchemy 2.0 ORM definitions for all 13 vxg-tracker tables (8 Phase 1 + 5 Phase 2)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -396,4 +397,309 @@ class AnomalyAlert(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class DailyPriceSeries(Base):
+    """Normalized daily reference series populated via backfill and Phase 1 live rollups."""
+
+    __tablename__ = "daily_price_series"
+    __table_args__ = (
+        UniqueConstraint("commodity_id", "location_id", "price_date", name="uq_daily_price_series_key"),
+        CheckConstraint("buy_price_vnd IS NULL OR buy_price_vnd > 0", name="buy_price_positive"),
+        CheckConstraint("sell_price_vnd IS NULL OR sell_price_vnd > 0", name="sell_price_positive"),
+        CheckConstraint(
+            "retail_price_vnd IS NULL OR retail_price_vnd > 0",
+            name="retail_price_positive",
+        ),
+        CheckConstraint("reference_price_vnd > 0", name="reference_price_positive"),
+        CheckConstraint(
+            "("
+            "(buy_price_vnd IS NOT NULL AND sell_price_vnd IS NOT NULL AND retail_price_vnd IS NULL)"
+            " OR "
+            "(buy_price_vnd IS NULL AND sell_price_vnd IS NULL AND retail_price_vnd IS NOT NULL)"
+            ")",
+            name="pricing_shape",
+        ),
+        CheckConstraint("series_origin IN ('BACKFILL', 'LIVE_ROLLUP')", name="series_origin"),
+        Index("idx_daily_price_series_lookup", "commodity_id", "location_id", text("price_date DESC")),
+        Index(
+            "idx_daily_price_series_adj",
+            "commodity_id",
+            "location_id",
+            text("price_date DESC"),
+            postgresql_where=text("is_adjustment_day = true"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    commodity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("commodities.id", ondelete="RESTRICT"), nullable=False
+    )
+    location_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=False
+    )
+    price_date: Mapped[date] = mapped_column(Date, nullable=False)
+    buy_price_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sell_price_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    retail_price_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reference_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    series_origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_adjustment_day: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    source_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("price_records.id", ondelete="SET NULL"), nullable=True
+    )
+    source_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    commodity: Mapped[Commodity] = relationship()
+    location: Mapped[Location] = relationship()
+    source_record: Mapped[PriceRecord | None] = relationship()
+
+
+class MacroIndicator(Base):
+    """Daily macroeconomic and FX series used as exogenous forecasting features."""
+
+    __tablename__ = "macro_indicators"
+    __table_args__ = (
+        UniqueConstraint(
+            "indicator_code", "indicator_date", name="uq_macro_indicators_code_date"
+        ),
+        CheckConstraint(
+            "indicator_code IN ('XAU_USD', 'BRENT_USD', 'WTI_USD', 'DXY', 'USD_VND_VCB')",
+            name="indicator_code",
+        ),
+        CheckConstraint("value > 0", name="value_positive"),
+        Index("idx_macro_indicators_code_date_desc", "indicator_code", text("indicator_date DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    indicator_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    indicator_date: Mapped[date] = mapped_column(Date, nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    open_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    high_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    low_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    change_pct_1d: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    unit: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MarketNewsSignal(Base):
+    """Deduplicated RSS financial/commodity news signals scored with lexicon + optional Gemini."""
+
+    __tablename__ = "market_news_signals"
+    __table_args__ = (
+        UniqueConstraint("url_sha256", name="uq_market_news_signals_url_sha256"),
+        UniqueConstraint("title_dedup_key", name="uq_market_news_signals_title_dedup_key"),
+        CheckConstraint("domain IN ('GOLD', 'FUEL', 'GAS', 'MACRO')", name="domain"),
+        CheckConstraint(
+            "polarity_score >= -1.0 AND polarity_score <= 1.0", name="polarity_range"
+        ),
+        CheckConstraint("impact_level IN ('LOW', 'MEDIUM', 'HIGH')", name="impact_level"),
+        CheckConstraint(
+            "scoring_engine IN ('LEXICON_V1', 'LEXICON_PLUS_GEMINI')",
+            name="scoring_engine",
+        ),
+        Index("idx_market_news_domain_pub_desc", "domain", text("published_at DESC")),
+        Index("idx_market_news_impact_pub_desc", "impact_level", text("published_at DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    domain: Mapped[str] = mapped_column(String(16), nullable=False)
+    publisher: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    url_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    title_dedup_key: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    polarity_score: Mapped[Decimal] = mapped_column(Numeric(5, 3), nullable=False)
+    impact_level: Mapped[str] = mapped_column(String(12), nullable=False)
+    catalysts: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    matched_keywords: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    llm_summary_vi: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scoring_engine: Mapped[str] = mapped_column(String(24), nullable=False)
+
+
+class PriceForecast(Base):
+    """Immutable pre-target price forecast snapshot with walk-forward diagnostics."""
+
+    __tablename__ = "price_forecasts"
+    __table_args__ = (
+        UniqueConstraint(
+            "commodity_id",
+            "location_id",
+            "forecast_date",
+            "horizon_type",
+            "model_version",
+            name="uq_price_forecasts_snapshot",
+        ),
+        CheckConstraint(
+            "horizon_type IN ('T_PLUS_1', 'T_PLUS_7', 'NEXT_FUEL_CYCLE', 'NEXT_GAS_MONTH')",
+            name="horizon_type",
+        ),
+        CheckConstraint("status IN ('READY', 'INSUFFICIENT_DATA')", name="status"),
+        CheckConstraint(
+            "predicted_direction IN ('UP', 'DOWN', 'FLAT', 'UNKNOWN')",
+            name="predicted_direction",
+        ),
+        CheckConstraint(
+            "target_date > forecast_date OR (horizon_type = 'NEXT_FUEL_CYCLE' AND target_date >= forecast_date)",
+            name="target_after_forecast",
+        ),
+        CheckConstraint(
+            "confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)",
+            name="confidence_range",
+        ),
+        CheckConstraint(
+            "("
+            "(status = 'INSUFFICIENT_DATA' AND point_estimate_vnd IS NULL)"
+            " OR "
+            "(status = 'READY' AND point_estimate_vnd IS NOT NULL AND point_estimate_vnd > 0 "
+            "AND lower_bound_vnd IS NOT NULL AND upper_bound_vnd IS NOT NULL "
+            "AND lower_bound_vnd <= point_estimate_vnd AND point_estimate_vnd <= upper_bound_vnd)"
+            ")",
+            name="status_payload_shape",
+        ),
+        Index(
+            "idx_price_forecasts_latest",
+            "commodity_id",
+            "location_id",
+            "horizon_type",
+            text("forecast_date DESC"),
+        ),
+        Index(
+            "idx_price_forecasts_pending_eval",
+            text("target_date ASC"),
+            "status",
+            postgresql_where=text("status = 'READY'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    commodity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("commodities.id", ondelete="RESTRICT"), nullable=False
+    )
+    location_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=False
+    )
+    forecast_date: Mapped[date] = mapped_column(Date, nullable=False)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False)
+    horizon_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(48), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    baseline_price_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    point_estimate_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    lower_bound_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    upper_bound_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    expected_change_vnd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    expected_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(7, 3), nullable=True)
+    predicted_direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 3), nullable=True)
+    news_adjustment_pct: Mapped[Decimal] = mapped_column(
+        Numeric(6, 3), nullable=False, server_default=text("0")
+    )
+    insufficient_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    drivers_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    commodity: Mapped[Commodity] = relationship()
+    location: Mapped[Location] = relationship()
+
+
+class ForecastEvaluation(Base):
+    """Out-of-sample evaluation comparing stored PriceForecast snapshots vs realized prices."""
+
+    __tablename__ = "forecast_evaluations"
+    __table_args__ = (
+        UniqueConstraint("forecast_id", name="uq_forecast_evaluations_forecast_id"),
+        CheckConstraint("actual_price_vnd > 0", name="actual_price_positive"),
+        CheckConstraint("predicted_price_vnd > 0", name="predicted_price_positive"),
+        CheckConstraint("abs_error_vnd >= 0", name="abs_error_non_negative"),
+        CheckConstraint("pct_error >= 0", name="pct_error_non_negative"),
+        CheckConstraint("predicted_direction IN ('UP', 'DOWN', 'FLAT')", name="predicted_direction"),
+        CheckConstraint("actual_direction IN ('UP', 'DOWN', 'FLAT')", name="actual_direction"),
+        Index(
+            "idx_forecast_evaluations_target_desc",
+            text("target_date DESC"),
+            text("evaluated_at DESC"),
+        ),
+        Index(
+            "idx_forecast_evaluations_group",
+            "commodity_id",
+            "horizon_type",
+            text("target_date DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    forecast_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("price_forecasts.id", ondelete="CASCADE"), nullable=False
+    )
+    commodity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("commodities.id", ondelete="RESTRICT"), nullable=False
+    )
+    location_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=False
+    )
+    horizon_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(48), nullable=False)
+    forecast_date: Mapped[date] = mapped_column(Date, nullable=False)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False)
+    actual_date: Mapped[date] = mapped_column(Date, nullable=False)
+    baseline_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    predicted_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actual_price_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    abs_error_vnd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pct_error: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
+    predicted_direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    actual_direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    direction_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    within_interval: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    forecast: Mapped[PriceForecast] = relationship()
+    commodity: Mapped[Commodity] = relationship()
+    location: Mapped[Location] = relationship()
 

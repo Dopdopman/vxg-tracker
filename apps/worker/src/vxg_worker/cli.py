@@ -6,10 +6,14 @@ import argparse
 import asyncio
 import sys
 import uuid
+from datetime import timedelta
 
 from vxg_shared.db.engine import create_async_db_engine, create_session_factory
 from vxg_shared.enums import CrawlScope, TriggerType
+from vxg_shared.timezone import vn_today
 from vxg_worker.config import WorkerSettings
+from vxg_worker.history.orchestrator import BackfillDomain, run_history_backfill
+from vxg_worker.history.rollup import rollup_daily_from_price_records
 from vxg_worker.runner import CrawlRunner, CrawlRunSummary, enqueue_crawl_run
 from vxg_worker.storage.snapshots import prune_expired_snapshots
 
@@ -99,6 +103,33 @@ async def _async_main(argv: list[str] | None = None) -> int:
         help="Override SNAPSHOT_RETENTION_DAYS (default 90)",
     )
 
+    rollup_p = subparsers.add_parser(
+        "rollup-daily",
+        help="Promote clean VERIFIED/CROSS_CHECKED Phase 1 prices into daily_price_series",
+    )
+    rollup_p.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        help="Only roll up records with effective_date within the last N days (default: all)",
+    )
+
+    backfill_p = subparsers.add_parser(
+        "backfill-history",
+        help="Backfill 12-24 months of real historical Gold/Fuel/Gas series into daily_price_series",
+    )
+    backfill_p.add_argument(
+        "--domain",
+        choices=[d.value for d in BackfillDomain],
+        default=BackfillDomain.ALL.value,
+    )
+    backfill_p.add_argument(
+        "--months",
+        type=int,
+        default=24,
+        help="History window in calendar months (default: 24)",
+    )
+
     args = parser.parse_args(argv)
     settings = WorkerSettings()
     engine = create_async_db_engine(settings.async_database_url)
@@ -114,6 +145,32 @@ async def _async_main(argv: list[str] | None = None) -> int:
                 f"Pruned expired snapshots: retention_days={prune_res.retention_days} "
                 f"cutoff={prune_res.cutoff_vn.isoformat()} "
                 f"deleted={prune_res.deleted_count} freed_bytes={prune_res.freed_bytes}"
+            )
+            return 0
+
+        if args.command == "rollup-daily":
+            since_date = (
+                vn_today() - timedelta(days=int(args.since_days))
+                if args.since_days is not None
+                else None
+            )
+            async with session_factory() as session:
+                rolled = await rollup_daily_from_price_records(session, since_date=since_date)
+                await session.commit()
+            print(f"Rolled up daily_price_series rows: count={rolled} since_date={since_date}")
+            return 0
+
+        if args.command == "backfill-history":
+            summary_bf = await run_history_backfill(
+                engine,
+                session_factory,
+                domain=BackfillDomain(args.domain),
+                months=max(1, int(args.months)),
+            )
+            print(
+                f"History backfill completed: domain={summary_bf.domain} "
+                f"months={summary_bf.months} duration_ms={summary_bf.duration_ms} "
+                f"stats={summary_bf.domain_stats} rollup_rows={summary_bf.rollup_rows}"
             )
             return 0
 

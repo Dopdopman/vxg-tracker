@@ -107,3 +107,53 @@ class AlertStatus(StrEnum):
     ACKNOWLEDGED = "ACKNOWLEDGED"
     RESOLVED = "RESOLVED"
 
+
+class SeriesOrigin(StrEnum):
+    BACKFILL = "BACKFILL"
+    LIVE_ROLLUP = "LIVE_ROLLUP"
+
+
+class MacroIndicatorCode(StrEnum):
+    XAU_USD = "XAU_USD"
+    BRENT_USD = "BRENT_USD"
+    WTI_USD = "WTI_USD"
+    DXY = "DXY"
+    USD_VND_VCB = "USD_VND_VCB"
+
+
+class NewsDomain(StrEnum):
+    GOLD = "GOLD"
+    FUEL = "FUEL"
+    GAS = "GAS"
+    MACRO = "MACRO"
+
+
+class NewsImpactLevel(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class NewsScoringEngine(StrEnum):
+    LEXICON_V1 = "LEXICON_V1"
+    LEXICON_PLUS_GEMINI = "LEXICON_PLUS_GEMINI"
+
+
+class ForecastHorizon(StrEnum):
+    T_PLUS_1 = "T_PLUS_1"
+    T_PLUS_7 = "T_PLUS_7"
+    NEXT_FUEL_CYCLE = "NEXT_FUEL_CYCLE"
+    NEXT_GAS_MONTH = "NEXT_GAS_MONTH"
+
+
+class ForecastStatus(StrEnum):
+    READY = "READY"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+
+
+class PredictedDirection(StrEnum):
+    UP = "UP"
+    DOWN = "DOWN"
+    FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
+

@@ -24,6 +24,7 @@ from vxg_shared.db.models import (
     Commodity,
     CrawlRun,
     CrawlSourceLog,
+    DailyPriceSeries,
     Location,
     PriceRecord,
     RawEvidenceSnapshot,
@@ -177,6 +178,13 @@ async def _cleanup_ci_bootstrap_data(
     try:
         async with session_factory() as cleanup:
             await cleanup.execute(delete(AnomalyAlert).where(AnomalyAlert.crawl_run_id == run_id))
+            await cleanup.execute(
+                delete(DailyPriceSeries).where(
+                    DailyPriceSeries.source_record_id.in_(
+                        select(PriceRecord.id).where(PriceRecord.crawl_run_id == run_id)
+                    )
+                )
+            )
             await cleanup.execute(delete(PriceRecord).where(PriceRecord.crawl_run_id == run_id))
             await cleanup.execute(
                 delete(CrawlSourceLog).where(CrawlSourceLog.crawl_run_id == run_id)

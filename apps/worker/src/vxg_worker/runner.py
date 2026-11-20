@@ -36,6 +36,7 @@ from vxg_worker.adapters.registry import build_default_adapter_registry
 from vxg_worker.config import WorkerSettings
 from vxg_worker.fetcher.two_tier import TwoTierFetcher
 from vxg_worker.fetcher.types import FetchResult
+from vxg_worker.history.rollup import rollup_daily_from_price_records
 from vxg_worker.locks import CrawlLockBusyError, PostgresAdvisoryLock
 from vxg_worker.notifier import AlertNotifier
 from vxg_worker.persistence import (
@@ -723,6 +724,11 @@ class CrawlRunner:
             run_row.finished_at = vn_now()
             run_row.duration_ms = duration_ms
             run_row.error_summary = "; ".join(run_errors)[:2000] if run_errors else None
+
+            if not smoke_only and rec_verified > 0:
+                await session.flush()
+                rolled = await rollup_daily_from_price_records(session, crawl_run_id=run_id)
+                logger.info("Rolled up %d daily_price_series rows for run %s", rolled, run_code)
 
             await session.commit()
 
