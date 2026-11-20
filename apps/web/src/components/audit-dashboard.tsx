@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronLeft, ChevronRight, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import {
   fetchAnomalies,
+  fetchAuditForecasts,
   fetchAuditSummary,
   fetchCrawlRuns,
   fetchSourcesHealth,
@@ -11,47 +12,64 @@ import {
 import {
   formatAlertTypeLabel,
   formatCount,
+  formatDirectionLabel,
   formatDomainLabel,
   formatDuration,
+  formatHorizonLabel,
   formatLatencyMs,
   formatPercent,
   formatScopeLabel,
   formatSeverityLabel,
   formatTriggerLabel,
+  formatVnDate,
   formatVnDateTime,
+  formatVnd,
 } from "@/lib/format";
 import type {
   AlertStatus,
   AnomaliesResponse,
+  AuditForecastsResponse,
   AuditSummaryResponse,
+  CommodityCategory,
   CrawlRunsListResponse,
+  ForecastEvaluationTypeFilter,
   SourcesHealthResponse,
 } from "@/lib/types";
 import { ManualCrawlModal } from "./manual-crawl-modal";
+import { ManualForecastModal } from "./manual-forecast-modal";
 import { RunDetailDrawer } from "./run-detail-drawer";
 import { SiteHeader } from "./site-header";
-import { AlertStatusBadge, RunStatusBadge, SourceHealthBadge } from "./status-badge";
+import {
+  AlertStatusBadge,
+  EvaluationTypeBadge,
+  RunStatusBadge,
+  SourceHealthBadge,
+} from "./status-badge";
 
-type AuditTab = "runs" | "health" | "anomalies";
+type AuditTab = "runs" | "health" | "anomalies" | "forecasts";
 type AnomalyFilter = "OPEN" | "RESOLVED" | "ALL";
+type DomainFilter = "ALL" | CommodityCategory;
 
 interface AuditDashboardProps {
   initialSummary: AuditSummaryResponse | null;
   initialRuns: CrawlRunsListResponse | null;
   initialHealth: SourcesHealthResponse | null;
   initialAnomalies: AnomaliesResponse | null;
+  initialForecastAudit: AuditForecastsResponse | null;
   initialRunId: string | null;
   initialTab: AuditTab;
   initialError: string | null;
 }
 
 const RUNS_PAGE_SIZE = 15;
+const FORECASTS_PAGE_SIZE = 15;
 
 export function AuditDashboard({
   initialSummary,
   initialRuns,
   initialHealth,
   initialAnomalies,
+  initialForecastAudit,
   initialRunId,
   initialTab,
   initialError,
@@ -62,14 +80,35 @@ export function AuditDashboard({
   const [runsData, setRunsData] = useState<CrawlRunsListResponse | null>(initialRuns);
   const [healthData, setHealthData] = useState<SourcesHealthResponse | null>(initialHealth);
   const [anomaliesData, setAnomaliesData] = useState<AnomaliesResponse | null>(initialAnomalies);
+  const [forecastAuditData, setForecastAuditData] = useState<AuditForecastsResponse | null>(
+    initialForecastAudit
+  );
   const [anomalyFilter, setAnomalyFilter] = useState<AnomalyFilter>("OPEN");
+  const [forecastEvalType, setForecastEvalType] = useState<ForecastEvaluationTypeFilter>("ALL");
+  const [forecastDomain, setForecastDomain] = useState<DomainFilter>("ALL");
+  const [forecastOffset, setForecastOffset] = useState(0);
   const [runsOffset, setRunsOffset] = useState(0);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId);
   const [manualModalOpen, setManualModalOpen] = useState(false);
+  const [manualForecastModalOpen, setManualForecastModalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
 
   const metrics = timeframe === "today" ? summary?.today : summary?.last_7_days;
+
+  const loadForecastAudit = async (
+    evalType = forecastEvalType,
+    domainFilter = forecastDomain,
+    offset = forecastOffset
+  ) => {
+    const nextForecasts = await fetchAuditForecasts({
+      evaluation_type: evalType,
+      domain: domainFilter === "ALL" ? undefined : domainFilter,
+      limit: FORECASTS_PAGE_SIZE,
+      offset,
+    });
+    setForecastAuditData(nextForecasts);
+  };
 
   const refreshAll = async (nextOffset = runsOffset, nextAnomFilter = anomalyFilter) => {
     setRefreshing(true);
@@ -77,20 +116,47 @@ export function AuditDashboard({
     try {
       const statusParam: AlertStatus | undefined =
         nextAnomFilter === "ALL" ? undefined : nextAnomFilter;
-      const [nextSummary, nextRuns, nextHealth, nextAnomalies] = await Promise.all([
-        fetchAuditSummary(),
-        fetchCrawlRuns({ limit: RUNS_PAGE_SIZE, offset: nextOffset }),
-        fetchSourcesHealth(),
-        fetchAnomalies({ status: statusParam, limit: 50, offset: 0 }),
-      ]);
+      const [nextSummary, nextRuns, nextHealth, nextAnomalies, nextForecastAudit] =
+        await Promise.all([
+          fetchAuditSummary(),
+          fetchCrawlRuns({ limit: RUNS_PAGE_SIZE, offset: nextOffset }),
+          fetchSourcesHealth(),
+          fetchAnomalies({ status: statusParam, limit: 50, offset: 0 }),
+          fetchAuditForecasts({
+            evaluation_type: forecastEvalType,
+            domain: forecastDomain === "ALL" ? undefined : forecastDomain,
+            limit: FORECASTS_PAGE_SIZE,
+            offset: forecastOffset,
+          }),
+        ]);
       setSummary(nextSummary);
       setRunsData(nextRuns);
       setHealthData(nextHealth);
       setAnomaliesData(nextAnomalies);
+      setForecastAuditData(nextForecastAudit);
     } catch (err: unknown) {
       setError(
         err instanceof Error ? err.message : "Không thể làm mới dữ liệu kiểm toán từ API."
       );
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const handleForecastFilterChange = async (
+    nextEvalType: ForecastEvaluationTypeFilter,
+    nextDomain: DomainFilter,
+    nextOffset = 0
+  ) => {
+    setForecastEvalType(nextEvalType);
+    setForecastDomain(nextDomain);
+    setForecastOffset(nextOffset);
+    setRefreshing(true);
+    setError(null);
+    try {
+      await loadForecastAudit(nextEvalType, nextDomain, nextOffset);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Không thể tải bảng độ chính xác dự báo.");
     } finally {
       setRefreshing(false);
     }
@@ -317,6 +383,17 @@ export function AuditDashboard({
             }`}
           >
             Cảnh báo bất thường ({summary?.open_anomalies ?? 0})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("forecasts")}
+            className={`ml-5 border-b-2 px-1 pb-2.5 text-sm transition-colors ${
+              activeTab === "forecasts"
+                ? "border-[#0F172A] font-semibold text-[#0F172A]"
+                : "border-transparent font-medium text-[#475569] hover:text-[#0F172A]"
+            }`}
+          >
+            Độ chính xác dự báo ({formatCount(forecastAuditData?.total ?? 0)})
           </button>
         </div>
 
@@ -573,6 +650,351 @@ export function AuditDashboard({
             )}
           </section>
         )}
+
+        {/* Tab 4: Độ chính xác dự báo (Tách bạch LIVE vs BACKTEST) */}
+        {activeTab === "forecasts" && (
+          <div className="space-y-5">
+            {/* Thanh trạng thái phiên dự báo & nút kích hoạt thủ công */}
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded border border-[#E2E8F0] bg-white px-5 py-4 text-xs">
+              <div className="space-y-1">
+                <p className="font-semibold text-[#0F172A]">Phiên tính dự báo &amp; chấm điểm gần nhất</p>
+                {forecastAuditData?.latest_forecast_run ? (
+                  <div className="tabular-nums flex flex-wrap items-center gap-2 text-[#475569]">
+                    <span className="font-mono font-medium text-[#0F172A]">
+                      {forecastAuditData.latest_forecast_run.run_code}
+                    </span>
+                    <RunStatusBadge status={forecastAuditData.latest_forecast_run.status} />
+                    <span>
+                      · {forecastAuditData.latest_forecast_run.forecasts_generated} READY ·{" "}
+                      {forecastAuditData.latest_forecast_run.evaluations_created} chấm điểm LIVE ·{" "}
+                      {formatVnDateTime(forecastAuditData.latest_forecast_run.started_at_vn)} (UTC+7)
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-[#475569]">
+                    Chưa ghi nhận ForecastRun thủ công hoặc định kỳ mới.
+                  </p>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setManualForecastModalOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded bg-[#0F172A] px-3.5 py-2 text-xs font-medium text-white transition-opacity hover:opacity-90"
+              >
+                <Play className="h-3.5 w-3.5" strokeWidth={1.75} />
+                <span>Chạy tính dự báo thủ công</span>
+              </button>
+            </section>
+
+            {/* 2 khối tổng quan tách biệt hoàn toàn: LIVE vs BACKTEST */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <section className="rounded border border-[#E2E8F0] bg-white p-5">
+                <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-[#0F172A]">
+                      Đánh giá thực tế (LIVE)
+                    </h2>
+                    <p className="text-xs text-[#475569]">
+                      Dự báo đã phát hành trước khi công bố giá thực tế
+                    </p>
+                  </div>
+                  <EvaluationTypeBadge type="LIVE" />
+                </div>
+
+                {!forecastAuditData || forecastAuditData.live_summary.total_evaluated === 0 ? (
+                  <p className="py-6 text-xs leading-relaxed text-[#475569]">
+                    Chưa có dự báo LIVE nào đến hạn chấm điểm thực tế. Hệ thống tách biệt hoàn toàn
+                    số liệu LIVE với kiểm thử ngược (BACKTEST) và sẽ tự động chấm điểm khi kỳ mục
+                    tiêu kết thúc.
+                  </p>
+                ) : (
+                  <div className="tabular-nums mt-4 grid grid-cols-2 gap-4 text-xs sm:grid-cols-4">
+                    <div>
+                      <p className="text-[#475569]">Số mẫu LIVE</p>
+                      <p className="mt-1 text-base font-semibold text-[#0F172A]">
+                        {formatCount(forecastAuditData.live_summary.total_evaluated)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#475569]">MAPE (Naive)</p>
+                      <p className="mt-1 text-base font-semibold text-[#0F172A]">
+                        {formatPercent(forecastAuditData.live_summary.mape_pct, 2)}
+                      </p>
+                      <p className="text-[11px] text-[#475569]">
+                        Naive: {formatPercent(forecastAuditData.live_summary.naive_mape_pct, 2)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#475569]">% đúng chiều</p>
+                      <p className="mt-1 text-base font-semibold text-emerald-700">
+                        {formatPercent(forecastAuditData.live_summary.direction_accuracy_pct, 1)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#475569]">Phủ biên 80%</p>
+                      <p className="mt-1 text-base font-semibold text-[#0F172A]">
+                        {formatPercent(forecastAuditData.live_summary.interval_coverage_pct, 1)}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className="rounded border border-[#E2E8F0] bg-white p-5">
+                <div className="flex items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-[#0F172A]">
+                      Kiểm thử ngược (BACKTEST — Walk-Forward)
+                    </h2>
+                    <p className="text-xs text-[#475569]">
+                      Tái lập cuộn quá khứ với ngưỡng Zero Look-Ahead
+                    </p>
+                  </div>
+                  <EvaluationTypeBadge type="BACKTEST" />
+                </div>
+
+                {!forecastAuditData || forecastAuditData.backtest_summary.total_evaluated === 0 ? (
+                  <p className="py-6 text-xs text-[#475569]">
+                    Chưa có bản ghi kiểm thử ngược cho bộ lọc hiện tại.
+                  </p>
+                ) : (
+                  <div className="tabular-nums mt-4 grid grid-cols-2 gap-4 text-xs sm:grid-cols-4">
+                    <div>
+                      <p className="text-[#475569]">Số mẫu Backtest</p>
+                      <p className="mt-1 text-base font-semibold text-[#0F172A]">
+                        {formatCount(forecastAuditData.backtest_summary.total_evaluated)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#475569]">MAPE (Naive)</p>
+                      <p className="mt-1 text-base font-semibold text-[#0F172A]">
+                        {formatPercent(forecastAuditData.backtest_summary.mape_pct, 2)}
+                      </p>
+                      <p className="text-[11px] text-[#475569]">
+                        Naive: {formatPercent(forecastAuditData.backtest_summary.naive_mape_pct, 2)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#475569]">% đúng chiều</p>
+                      <p className="mt-1 text-base font-semibold text-emerald-700">
+                        {formatPercent(
+                          forecastAuditData.backtest_summary.direction_accuracy_pct,
+                          1
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#475569]">Phủ biên 80%</p>
+                      <p className="mt-1 text-base font-semibold text-[#0F172A]">
+                        {formatPercent(
+                          forecastAuditData.backtest_summary.interval_coverage_pct,
+                          1
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </div>
+
+            {/* Bảng phân trang đối chiếu Dự đoán vs Thực tế */}
+            <section className="rounded border border-[#E2E8F0] bg-white">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] px-5 py-3 text-xs">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="inline-flex items-center gap-1">
+                    {(
+                      [
+                        { code: "ALL", label: "Tất cả" },
+                        { code: "LIVE", label: "LIVE" },
+                        { code: "BACKTEST", label: "BACKTEST" },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.code}
+                        type="button"
+                        onClick={() =>
+                          void handleForecastFilterChange(opt.code, forecastDomain, 0)
+                        }
+                        className={`rounded border px-2.5 py-1 transition-colors ${
+                          forecastEvalType === opt.code
+                            ? "border-[#0F172A] bg-[#0F172A] font-medium text-white"
+                            : "border-[#E2E8F0] bg-white text-[#475569] hover:text-[#0F172A]"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="inline-flex items-center gap-1">
+                    {(
+                      [
+                        { code: "ALL", label: "Mọi ngành" },
+                        { code: "GOLD", label: "Vàng" },
+                        { code: "FUEL", label: "Xăng dầu" },
+                        { code: "GAS", label: "Gas" },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.code}
+                        type="button"
+                        onClick={() =>
+                          void handleForecastFilterChange(forecastEvalType, opt.code, 0)
+                        }
+                        className={`rounded border px-2.5 py-1 transition-colors ${
+                          forecastDomain === opt.code
+                            ? "border-[#0F172A] bg-[#F8FAFC] font-semibold text-[#0F172A]"
+                            : "border-[#E2E8F0] bg-white text-[#475569] hover:text-[#0F172A]"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <span className="tabular-nums text-[#475569]">
+                  Tổng: {formatCount(forecastAuditData?.total ?? 0)} bản ghi đối chiếu
+                </span>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-xs font-medium uppercase tracking-wider text-[#475569]">
+                      <th className="px-5 py-3">Loại</th>
+                      <th className="px-4 py-3">Mặt hàng &amp; Mô hình</th>
+                      <th className="px-4 py-3">Ngày mục tiêu</th>
+                      <th className="px-4 py-3 text-right">Dự đoán</th>
+                      <th className="px-4 py-3 text-right">Thực tế</th>
+                      <th className="px-4 py-3 text-right">Sai số</th>
+                      <th className="px-4 py-3 text-right">Chiều / Biên 80%</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#E2E8F0]">
+                    {!forecastAuditData || forecastAuditData.items.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-5 py-8 text-center text-sm text-[#475569]">
+                          Không có bản ghi đối chiếu nào khớp bộ lọc.
+                        </td>
+                      </tr>
+                    ) : (
+                      forecastAuditData.items.map((row) => (
+                        <tr key={row.evaluation_id} className="hover:bg-[#F8FAFC]">
+                          <td className="px-5 py-3.5">
+                            <EvaluationTypeBadge type={row.evaluation_type} />
+                          </td>
+                          <td className="px-4 py-3.5 text-xs">
+                            <p className="font-medium text-[#0F172A]">
+                              {row.commodity_name} ({row.location_code})
+                            </p>
+                            <p className="font-mono mt-0.5 text-[11px] text-[#475569]">
+                              {row.model_version} · {formatHorizonLabel(row.horizon_type)}
+                            </p>
+                          </td>
+                          <td className="tabular-nums px-4 py-3.5 text-xs text-[#475569]">
+                            <p className="font-medium text-[#0F172A]">
+                              {formatVnDate(row.target_date)}
+                            </p>
+                            <p className="text-[11px]">Từ {formatVnDate(row.forecast_date)}</p>
+                          </td>
+                          <td className="tabular-nums px-4 py-3.5 text-right text-xs">
+                            <p className="font-semibold text-[#0F172A]">
+                              {formatVnd(row.predicted_price)}
+                            </p>
+                            {row.lower_bound !== null && row.upper_bound !== null && (
+                              <p className="text-[11px] text-[#475569]">
+                                {formatVnd(row.lower_bound, { includeSymbol: false })}–
+                                {formatVnd(row.upper_bound, { includeSymbol: false })}
+                              </p>
+                            )}
+                          </td>
+                          <td className="tabular-nums px-4 py-3.5 text-right text-xs font-semibold text-[#0F172A]">
+                            {formatVnd(row.actual_price)}
+                          </td>
+                          <td className="tabular-nums px-4 py-3.5 text-right text-xs">
+                            <p className="font-medium text-[#0F172A]">
+                              {formatPercent(row.pct_error, 2)}
+                            </p>
+                            <p className="text-[11px] text-[#475569]">
+                              {formatVnd(row.abs_error_vnd)}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3.5 text-right text-xs">
+                            <p
+                              className={`font-medium ${
+                                row.direction_correct ? "text-emerald-700" : "text-rose-700"
+                              }`}
+                            >
+                              {row.direction_correct ? "Đúng chiều" : "Sai chiều"} (
+                              {formatDirectionLabel(row.predicted_direction).replace(
+                                "Xu hướng ",
+                                ""
+                              )}
+                              )
+                            </p>
+                            <p className="text-[11px] text-[#475569]">
+                              {row.within_interval ? "Trong biên 80%" : "Ngoài biên"}
+                            </p>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {(forecastAuditData?.total ?? 0) > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] px-5 py-3 text-xs text-[#475569]">
+                  <span className="tabular-nums">
+                    Trang {Math.floor(forecastOffset / FORECASTS_PAGE_SIZE) + 1} /{" "}
+                    {Math.max(
+                      1,
+                      Math.ceil((forecastAuditData?.total ?? 0) / FORECASTS_PAGE_SIZE)
+                    )}{" "}
+                    · Tổng {formatCount(forecastAuditData?.total ?? 0)} mẫu
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={forecastOffset === 0 || refreshing}
+                      onClick={() =>
+                        void handleForecastFilterChange(
+                          forecastEvalType,
+                          forecastDomain,
+                          Math.max(0, forecastOffset - FORECASTS_PAGE_SIZE)
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded border border-[#E2E8F0] bg-white px-2.5 py-1 font-medium text-[#0F172A] hover:bg-[#F8FAFC] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.75} />
+                      Trước
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        forecastOffset + FORECASTS_PAGE_SIZE >= (forecastAuditData?.total ?? 0) ||
+                        refreshing
+                      }
+                      onClick={() =>
+                        void handleForecastFilterChange(
+                          forecastEvalType,
+                          forecastDomain,
+                          forecastOffset + FORECASTS_PAGE_SIZE
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded border border-[#E2E8F0] bg-white px-2.5 py-1 font-medium text-[#0F172A] hover:bg-[#F8FAFC] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Sau
+                      <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.75} />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
       </main>
 
       <RunDetailDrawer runId={selectedRunId} onClose={() => setSelectedRunId(null)} />
@@ -585,6 +1007,12 @@ export function AuditDashboard({
           setActiveTab("runs");
           setSelectedRunId(runId);
         }}
+      />
+
+      <ManualForecastModal
+        open={manualForecastModalOpen}
+        onClose={() => setManualForecastModalOpen(false)}
+        onCompleted={() => void refreshAll(runsOffset, anomalyFilter)}
       />
     </div>
   );

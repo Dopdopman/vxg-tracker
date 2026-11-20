@@ -1,6 +1,6 @@
 # Hướng dẫn Triển khai Production 100% Miễn phí (`vxg-tracker`)
 
-Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1** của **VXG Tracker** trên hạ tầng **100% miễn phí chuẩn Production** (khu vực Singapore):
+Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1 & Phase 2** của **VXG Tracker** trên hạ tầng **100% miễn phí chuẩn Production** (khu vực Singapore):
 
 - **Database:** **Neon** Serverless PostgreSQL 16 (Singapore)
 - **Scraper Worker & Scheduler:** **GitHub Actions** ([`crawl-schedule.yml`](../.github/workflows/crawl-schedule.yml) — Ubuntu `7GB RAM`, chạy Playwright Chromium)
@@ -28,9 +28,11 @@ Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1
    - Đảm bảo file `.env` cục bộ **không bao giờ** bị push (đã được chặn sẵn trong `.gitignore`).
 2. Vào **GitHub Repo -> Settings -> Secrets and variables -> Actions -> New repository secret**, thêm:
    - `DATABASE_URL` *(Bắt buộc)*: Dán chuỗi kết nối PostgreSQL của **Neon** ở Bước 1.
+   - `GEMINI_API_KEY` *(Tùy chọn Phase 2)*: Khóa Gemini Flash Lite để tóm tắt tiếng Việt cho tin tức có mức tác động `HIGH`. Nếu bỏ trống (hoặc hết quota), worker tự động chạy **0 đồng** bằng *Deterministic Lexicon & Catalyst Engine* và fallback êm ái không lỗi.
    - `ALERT_TELEGRAM_BOT_TOKEN` *(Tùy chọn)*: Bot token nhận cảnh báo lỗi nguồn/dữ liệu bất thường.
    - `ALERT_TELEGRAM_CHAT_ID` *(Tùy chọn)*: Group/Chat ID nhận tin Telegram.
    - `ALERT_DISCORD_WEBHOOK_URL` *(Tùy chọn)*: URL Discord Webhook nếu dùng Discord.
+   - `SCRAPER_HTTP_PROXY` *(Tùy chọn)*: Proxy dự phòng nếu nguồn mục tiêu chặn IP runner.
 3. Tạo **Fine-grained Personal Access Token** (`GITHUB_DISPATCH_TOKEN`) để nút **"Chạy cào thủ công"** trên `/audit` kích hoạt được GitHub Actions:
    - Vào **GitHub Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens -> Generate new token**.
    - **Repository access:** Chọn *Only select repositories* -> chọn repo `vxg-tracker`.
@@ -41,9 +43,9 @@ Tài liệu này hướng dẫn chi tiết từng bước triển khai **Phase 1
 
 | Giờ UTC (Cron) | Giờ Việt Nam (`UTC+7`) | Phạm vi thực thi | Mục đích |
 | :--- | :--- | :--- | :--- |
-| `15 17 * * *` | `00:15` sáng hằng ngày | `ALL` + `prune-snapshots --retention-days 90` | Quét đủ Vàng, Xăng dầu, Gas ngay khi bước qua ngày mới và dọn snapshot quá 90 ngày trong cùng 1 phiên chạy |
+| `15 17 * * *` | `00:15` sáng hằng ngày | `ALL` (Crawl + Macro + News + Evaluate + Forecast + Prune) | Quét đủ 11 nguồn giá, đồng bộ vĩ mô/RSS tin tức, chấm điểm dự báo `LIVE` đến hạn, sinh dự báo mới và dọn snapshot quá 90 ngày trong cùng 1 phiên |
 
-*(Ước tính tổng thời gian chạy ~40–75 phút/tháng trên `ubuntu-latest`, tiết kiệm tối đa trong hạn mức **2.000 phút/tháng miễn phí** của GitHub Actions cho private repo hoặc không giới hạn với public repo. Ngoài ra, `vxg-api` tự động hết hạn các bản ghi `QUEUED` quá **15 phút** sang `FAILED` trước khi kiểm tra trùng lặp, tránh khóa nút chạy cào thủ công trên `/audit` nếu GitHub Actions gặp sự cố trước khi kết nối DB.)*
+*(Ngoài ra, [`.github/workflows/backfill-history.yml`](../.github/workflows/backfill-history.yml) hỗ trợ `workflow_dispatch` chạy tay khi khởi tạo hoặc nạp bổ sung chuỗi giá lịch sử + chỉ số vĩ mô tối đa 24 tháng. Đồng thời `vxg-api` tự động hết hạn các bản ghi `QUEUED` quá **15 phút** sang `FAILED` trước khi kiểm tra trùng lặp, tránh khóa nút chạy thủ công trên `/audit`.)*
 
 ---
 
@@ -117,3 +119,27 @@ Render Free Web Service sẽ tự ngủ (*spin down*) sau **15 phút** không c�
   ```bash
   pg_restore --dbname="<NEON_DIRECT_DATABASE_URL>" --clean --if-exists --no-owner "vxg_neon_YYYYMMDD_HHMM.dump"
   ```
+
+---
+
+## Bước 7. Quy trình nâng cấp & kích hoạt Phase 2 lên Production
+
+Khi đẩy mã nguồn Phase 2 từ nhánh `main` lên GitHub / Render / Vercel, thực hiện lần lượt **4 bước một lần** sau:
+
+1. **Chạy Alembic Migration `0002` → `0004` lên Neon PostgreSQL:**
+   - Khi `vxg-api` trên Render triển khai lại commit mới với `RUN_MIGRATIONS_ON_START=true`, `entrypoint.sh` tự động chạy `alembic upgrade head` để tạo đủ 5 bảng mới (`daily_price_series`, `macro_indicators`, `market_news_signals`, `price_forecasts`, `forecast_evaluations`) cùng bảng hàng đợi `forecast_runs`.
+   - Kiểm tra nhanh tại `https://<ten-app>.onrender.com/ready` và `https://<ten-app>.onrender.com/api/v1/forecasts/latest` (HTTP `200`).
+2. **Nạp lịch sử giá & chỉ số vĩ mô 24 tháng (chạy 1 lần):**
+   - Vào **GitHub Repo -> Actions -> `Backfill Historical Price Series` (`backfill-history.yml`) -> Run workflow**.
+   - Chọn **`domain: ALL`**, **`months: 24`** rồi bấm **Run workflow**.
+   - Bước này tự động backfill CafeF/Webgia Vàng (HCM), Saigon Petro Xăng dầu (Vùng 1), Saigon Petro & VietNamBiz Gas (HCM), chạy `rollup-daily` cho dữ liệu Phase 1 hiện có và backfill 24 tháng `XAU_USD`, `BRENT_USD`, `WTI_USD`, `DXY`, `USD_VND_MARKET` + cửa sổ `USD_VND_VCB`.
+3. *(Tùy chọn)* **Thêm Secret `GEMINI_API_KEY`** trong **GitHub Repo -> Settings -> Secrets -> Actions** nếu muốn bật Tier 2 tóm tắt tiếng Việt cho tin `HIGH`; nếu không thêm, hệ thống vận hành 100% ở mức 0 đồng bằng Deterministic Lexicon.
+4. **Nạp Walk-Forward Backtest & sinh bộ dự báo đầu tiên trên Neon:**
+   - **Sinh dữ liệu kiểm thử ngược (`BACKTEST`) ban đầu:** chạy 1 lần từ máy local trỏ vào Neon Direct URL (hoặc SSH/one-off command) để điền lịch sử đánh giá cho tab `/audit` -> `Độ chính xác dự báo`:
+     ```powershell
+     $env:DATABASE_URL="<NEON_POSTGRES_URL>"
+     .\.venv\Scripts\python.exe -m vxg_worker.cli sync-news --hours 72
+     .\.venv\Scripts\python.exe -m vxg_worker.cli backtest-forecasts --scope ALL
+     ```
+   - **Kích hoạt tính dự báo định kỳ/thủ công:** vào UI `/audit` -> tab **`Độ chính xác dự báo`** -> bấm **`Chạy tính dự báo thủ công`** (`ALL`), hoặc chạy trên GitHub **Actions -> `Crawl Schedule & On-Demand Worker` -> Run workflow (`task_type: forecast`, `scope: ALL`)**.
+   - Từ ngày hôm sau trở đi, cron `00:15 UTC+7` trong `crawl-schedule.yml` tự động vận hành khép kín: cào giá → cập nhật vĩ mô → quét RSS tin tức → chấm điểm dự báo `LIVE` đến hạn → sinh dự báo mới → dọn snapshot quá 90 ngày.

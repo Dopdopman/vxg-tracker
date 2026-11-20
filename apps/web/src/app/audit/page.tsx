@@ -1,6 +1,7 @@
 import { AuditDashboard } from "@/components/audit-dashboard";
 import {
   fetchAnomalies,
+  fetchAuditForecasts,
   fetchAuditSummary,
   fetchCrawlRuns,
   fetchSourcesHealth,
@@ -24,16 +25,18 @@ export default async function AuditPage({
   const initialRunId = normalizeParam(params.runId);
   const rawTab = normalizeParam(params.tab);
   const initialTab =
-    rawTab === "health" || rawTab === "anomalies" ? rawTab : "runs";
+    rawTab === "health" || rawTab === "anomalies" || rawTab === "forecasts" ? rawTab : "runs";
 
-  const [summaryRes, runsRes, healthRes, anomaliesRes] = await Promise.allSettled([
-    fetchAuditSummary(),
-    fetchCrawlRuns({ limit: 15, offset: 0 }),
-    fetchSourcesHealth(),
-    fetchAnomalies({ status: "OPEN", limit: 50, offset: 0 }),
-  ]);
+  const [summaryRes, runsRes, healthRes, anomaliesRes, forecastAuditRes] =
+    await Promise.allSettled([
+      fetchAuditSummary(),
+      fetchCrawlRuns({ limit: 15, offset: 0 }),
+      fetchSourcesHealth(),
+      fetchAnomalies({ status: "OPEN", limit: 50, offset: 0 }),
+      fetchAuditForecasts({ limit: 15, offset: 0 }),
+    ]);
 
-  const firstFailure = [summaryRes, runsRes, healthRes, anomaliesRes].find(
+  const firstFailure = [summaryRes, runsRes, healthRes, anomaliesRes, forecastAuditRes].find(
     (res): res is PromiseRejectedResult => res.status === "rejected"
   );
 
@@ -49,6 +52,9 @@ export default async function AuditPage({
       initialRuns={runsRes.status === "fulfilled" ? runsRes.value : null}
       initialHealth={healthRes.status === "fulfilled" ? healthRes.value : null}
       initialAnomalies={anomaliesRes.status === "fulfilled" ? anomaliesRes.value : null}
+      initialForecastAudit={
+        forecastAuditRes.status === "fulfilled" ? forecastAuditRes.value : null
+      }
       initialRunId={initialRunId}
       initialTab={initialTab}
       initialError={initialError}

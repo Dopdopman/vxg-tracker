@@ -1,27 +1,29 @@
 # VXG Tracker
 
-Hệ thống tự động thu thập, kiểm chứng nguồn gốc và hiển thị bảng giá hàng ngày cho **3 mặt hàng thiết yếu tại Việt Nam** (**Vàng**, **Xăng dầu**, **Gas**) tại **Hà Nội (`HN`)**, **Đà Nẵng (`DN`)** và **TP. Hồ Chí Minh (`HCM`)**.
+Hệ thống tự động thu thập, kiểm chứng nguồn gốc, phân tích tín hiệu vĩ mô/tin tức và dự báo định lượng hàng ngày cho **3 mặt hàng thiết yếu tại Việt Nam** (**Vàng**, **Xăng dầu**, **Gas**) tại **Hà Nội (`HN`)**, **Đà Nẵng (`DN`)** và **TP. Hồ Chí Minh (`HCM`)**.
 
-> **Phạm vi Phase 1 (Strict Scope):** Tập trung 100% vào dữ liệu thực tế từ **11 nguồn chính thức và đối chứng**, kiểm chứng **6 tầng an toàn**, lưu trữ chuỗi thời gian sạch theo múi giờ **`Asia/Ho_Chi_Minh` (`UTC+7`)**, cung cấp hồ sơ bằng chứng gốc (`SHA-256` + link nguồn) và minh bạch toàn bộ nhật ký kiểm toán. **Tuyệt đối không** dùng dữ liệu giả lập (mock) và **chưa có** tính năng dự đoán giá (AI forecasting).
+> **Nguyên tắc dữ liệu (Phase 1 + Phase 2):** Toàn bộ số liệu giá kiểm toán lấy từ **11 nguồn chính thức và đối chứng**, kiểm chứng **6 tầng an toàn**, tách bạch hoàn toàn **8 bảng Phase 1** với **5 bảng Phase 2** (`daily_price_series`, `macro_indicators`, `market_news_signals`, `price_forecasts`, `forecast_evaluations`). **Tuyệt đối không** dùng dữ liệu giả lập (mock); các mã chưa đủ lịch sử trả rõ trạng thái `INSUFFICIENT_DATA`.
 
 ---
 
 ## Kiến trúc 100% Miễn phí chuẩn Production & Local
 
-- **Local Development:** Docker Compose 1 lệnh với `postgres` + `migrator` + `api` (`WORKER_DISPATCH_MODE=db_poll`) + `worker` (APScheduler daemon + poll queue) + `web`.
+- **Local Development:** Docker Compose 1 lệnh với `postgres` + `migrator` + `api` (`WORKER_DISPATCH_MODE=db_poll`) + `worker` (APScheduler daemon + poll `crawl_runs` & `forecast_runs`) + `web`.
+- **Cô lập ML Runtime (Render Free 512MB RAM Safe):** `numpy` và `scikit-learn` chỉ cài đặt trong [`apps/worker`](apps/worker); [`packages/shared-py`](packages/shared-py) và [`apps/api`](apps/api) giữ nhẹ tối đa để chạy ổn định trên **Render Free**.
 - **Production Free Stack (Singapore):**
   - **Neon PostgreSQL 16** (tự động chuẩn hóa `sslmode`/`channel_binding` cho `asyncpg` & `psycopg`, `pool_pre_ping=True`, `pool_recycle=300`).
-  - **Render Free (`vxg-api`)** — FastAPI server cấu hình bằng [`render.yaml`](render.yaml), tự động chạy migration/seed lúc boot qua [`apps/api/entrypoint.sh`](apps/api/entrypoint.sh), nhận nút *"Chạy cào thủ công"* trên `/audit` và dispatch tới GitHub Actions (`WORKER_DISPATCH_MODE=github_actions`).
-  - **GitHub Actions Crawler Worker** ([`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml)) — Chạy 1 lần/ngày lúc **00:15 sáng theo giờ Việt Nam (`UTC+7`, cron `15 17 * * *` UTC)** quét toàn bộ (`ALL`) + dọn snapshot quá 90 ngày trong cùng 1 phiên, và thực thi theo `--run-id` khi admin kích hoạt thủ công trên UI.
-  - **Vercel Hobby (`apps/web`)** — Next.js 15 App Router deploy tại region `sin1` ([`apps/web/vercel.json`](apps/web/vercel.json)).
+  - **Render Free (`vxg-api`)** — FastAPI server cấu hình bằng [`render.yaml`](render.yaml), tự động chạy migration `0001`→`0004` + seed lúc boot qua [`apps/api/entrypoint.sh`](apps/api/entrypoint.sh), nhận kích hoạt thủ công trên `/audit` và dispatch tới GitHub Actions (`WORKER_DISPATCH_MODE=github_actions`).
+  - **GitHub Actions Worker** ([`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml) & [`.github/workflows/backfill-history.yml`](.github/workflows/backfill-history.yml)) — Chạy định kỳ hằng ngày lúc **00:15 (`UTC+7`)**: cào giá (`ALL`), đồng bộ vĩ mô, đồng bộ tin tức RSS, chấm điểm `evaluate-forecasts`, sinh dự báo `run-forecasts`, và dọn snapshot quá 90 ngày.
+  - **Vercel Hobby (`apps/web`)** — Next.js 15 App Router deploy tại region `sin1` ([`apps/web/vercel.json`](apps/web/vercel.json)) gồm **3 trang**: `/` (`Bảng giá`), `/forecast` (`Phân tích & Dự báo` dùng `lightweight-charts` v5) và `/audit` (`Kiểm toán dữ liệu` + Tab `Độ chính xác dự báo`).
 
 ```mermaid
 flowchart LR
-    WEB["Next.js 15 App Router\n(Vercel Hobby sin1 · / & /audit)"] -->|"REST API + X-Admin-API-Key"| API["FastAPI Server\n(Render Free Singapore)"]
-    API -->|"Read/Audit + Queue QUEUED runs"| DB[("Neon PostgreSQL 16\nSingapore · SSL + Pre-Ping")]
-    API -.->|"workflow_dispatch (run_id, scope)"| GHA["GitHub Actions Worker\n(crawl-schedule.yml · Cron & On-Demand\nHTTPX + Playwright Chromium)"]
-    GHA <-->|"PG Advisory Lock + Upsert + Logs"| DB
-    GHA -->|"2-Tier Fetch & 6-Layer Guardrails"| VN["11 Nguồn Thực Tế VN\n(SJC, DOJI, PNJ, CafeF,\nPetrolimex, Saigon Petro, PV Gas...)"]
+    WEB["Next.js 15 App Router\n(Vercel Hobby sin1 · /, /forecast, /audit)"] -->|"REST API + X-Admin-API-Key"| API["FastAPI Server (No ML libs)\n(Render Free Singapore)"]
+    API -->|"Read/Audit + Queue QUEUED runs"| DB[("Neon PostgreSQL 16\n13 Tables · 8 P1 + 5 P2")]
+    API -.->|"workflow_dispatch (task_type, scope, run_id)"| GHA["GitHub Actions Worker\n(crawl-schedule.yml + ML libs)"]
+    GHA <-->|"PG Advisory Lock + Upsert + Rollup"| DB
+    GHA -->|"2-Tier Fetch & 6-Layer Guardrails"| VN["11 Nguồn VN (SJC, DOJI, PNJ, CafeF,\nPetrolimex, Saigon Petro, PV Gas...)"]
+    GHA -->|"Yahoo v8 / VCB / Google & RSS"| MACRO["Chỉ số Vĩ mô & Tin tức RSS\n(XAU, Brent, WTI, DXY, FX)"]
     GHA -->|"Schema Drift / Blocked / FLAGGED"| ALERT["Telegram Bot /\nDiscord Webhook"]
 ```
 
@@ -29,11 +31,15 @@ flowchart LR
 
 ## Tính năng cốt lõi
 
-- **2-Tier Fetcher & Chống chặn bot:** Ưu tiên `httpx` với HTTP header chuẩn `vi-VN`, retry exponential backoff + jitter; tự fallback sang **Playwright Chromium** headless khi trang render JS hoặc gặp WAF/cookie challenge.
-- **Kiểm chứng 6 tầng (`6-Layer Validation Guardrails`) & Đối chứng chéo:** Kiểm tra kiểu/SHA-256/URL, chặn giá `<= 0`, kiểm tra logic mua/bán & quy cách bình gas, kiểm tra biên độ hợp lý, chống nhảy giá đột biến (`PRICE_SPIKE_THRESHOLD_PCT=15%`), chuẩn hóa `Asia/Ho_Chi_Minh`, idempotent upsert và đối chiếu chéo Tier 1 ↔ Tier 2 (`CROSS_CHECKED`).
-- **Zero Stuck Jobs & Fail-Safe:** Khi ở chế độ `github_actions`, nếu lệnh dispatch sang GitHub API thất bại (timeout hoặc HTTP 4xx/5xx), API lập tức cập nhật bản ghi `crawl_runs` sang `FAILED` và trả mã lỗi `502 GITHUB_DISPATCH_FAILED` thống nhất. Đồng thời trước khi kiểm tra trùng lặp, API tự động hết hạn các bản ghi `QUEUED` tạo quá **15 phút** sang `FAILED` (`Timed out waiting in QUEUED state (>15m)`) để nút chạy cào thủ công không bao giờ bị khóa vĩnh viễn.
-- **Snapshot Retention 90 ngày:** Tự động xóa bản nén gzip `raw_evidence_snapshots` quá hạn mà vẫn giữ toàn vẹn `price_records`, `crawl_runs` và SHA-256 của mức giá `VERIFIED` mới nhất.
-- **Giao diện Financial / Editorial (`tabular-nums`):** Bảng giá tối giản, quy đổi nhanh **VND / Lượng ↔ VND / Chỉ**, **Evidence Drawer** kiểm chứng nguồn gốc và trang `/audit` đầy đủ.
+- **Thu thập & Kiểm chứng Phase 1:** 2-Tier Fetcher (`httpx` + Playwright Chromium headless), kiểm chứng 6 tầng (`6-Layer Validation Guardrails`), đối chiếu chéo Tier 1 ↔ Tier 2 (`CROSS_CHECKED`), `SHA-256` & snapshot retention 90 ngày, Fail-Safe `QUEUED` timeout 15 phút.
+- **Lịch sử & Tín hiệu Vĩ mô/Tin tức (M7 & M8):**
+  - Chuỗi chuẩn hóa `daily_price_series` (backfill CafeF Gold 2 năm HCM, Saigon Petro Fuel 16 tháng Vùng 1, Saigon Petro & VietNamBiz Gas HCM) + tự động `LIVE_ROLLUP` sau mỗi phiên cào Phase 1.
+  - Chỉ số vĩ mô (`XAU_USD`, `BRENT_USD`, `WTI_USD`, `DXY`, `USD_VND_VCB`, `USD_VND_MARKET`) và công thức minh bạch **Chênh lệch Vàng SJC vs Thế giới quy đổi** (`XAU_USD * (37.5 / 31.1034768) * USD_VND`).
+  - Động cơ tin tức RSS 2 tầng (mặc định 0 đồng với Deterministic Lexicon & Catalyst Engine + tùy chọn `GEMINI_API_KEY` fallback an toàn).
+- **Động cơ Dự báo 3 ngành & Chấm điểm minh bạch (M9):**
+  - **Zero Look-Ahead Bias** tuyệt đối (`<= as_of`): *Vàng* (`T+1`, `T+7` — HuberRegressor trên chênh lệch nội/ngoại, XAU, DXY, tỷ giá), *Xăng dầu* (Kỳ điều hành Thứ Năm `15:00` — Ridge trên bình quân 7 ngày Brent/WTI/FX trong kỳ so với kỳ trước), *Gas* (Kỳ đầu tháng — Pass-Through khi `<12` tháng, tự nâng cấp Ridge khi đủ `>=12` tháng).
+  - Risk Overlay từ tin tức tác động cao (`high_volatility_flag`), Walk-Forward Backtest so sánh `Naive Baseline`, và tách biệt nghiêm ngặt số liệu **`LIVE`** với **`BACKTEST`**.
+- **Giao diện Financial / Editorial (`tabular-nums`, M10):** Bảng giá tối giản kèm `prev_change_vnd/pct` và Evidence Drawer tại `/`, biểu đồ `lightweight-charts` v5 + 3 chỉ số cốt lõi + 2 tab giải thích tại `/forecast`, và Tab thứ 4 `Độ chính xác dự báo` tại `/audit`.
 
 ---
 
@@ -41,78 +47,60 @@ flowchart LR
 
 | Thành phần | Đường dẫn | Vai trò chính |
 | :--- | :--- | :--- |
-| **Shared Package** | [`packages/shared-py`](packages/shared-py) | SQLAlchemy 2.0 ORM (8 bảng), Alembic migrations, Neon SSL/pool normalizer, `Asia/Ho_Chi_Minh` timezone, SHA-256 hashing, `seed.py` |
-| **REST & Audit API** | [`apps/api`](apps/api) | FastAPI `/api/v1/*`, Render [`entrypoint.sh`](apps/api/entrypoint.sh), hỗ trợ `db_poll` & `github_actions` dispatch, Production `ADMIN_API_KEY` guard |
-| **Scraper Worker** | [`apps/worker`](apps/worker) | 2-Tier Fetcher, 11 adapters VN thật, 6-Layer Guardrails, CLI `--run-id`, APScheduler `UTC+7` (local), `AlertNotifier`, Snapshot Retention |
-| **Web Dashboard** | [`apps/web`](apps/web) | Next.js 15 + Tailwind v4 (`/` Bảng giá, Evidence Drawer, `/audit` Kiểm toán & Modal chạy thủ công hỗ trợ cold start) |
-| **CI Workflow** | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lint, `mypy`, offline `pytest`, integration test trên Postgres 16, Next.js build + secret scan, Docker Buildx check |
-| **Crawler Workflow** | [`.github/workflows/crawl-schedule.yml`](.github/workflows/crawl-schedule.yml) | Scheduled cron `00:15 UTC+7` hằng ngày (`ALL` + `prune-snapshots --retention-days 90`) + `workflow_dispatch` nhận `scope` & `run_id` chạy Playwright trên `ubuntu-latest` |
-| **Render Blueprint** | [`render.yaml`](render.yaml) | Cấu hình deploy `vxg-api` miễn phí tại region Singapore |
-| **Hướng dẫn Deploy** | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Hướng dẫn từng bước triển khai **Neon + GitHub Actions + Render Free + Vercel Hobby + cron-job.org** |
+| **Shared Package** | [`packages/shared-py`](packages/shared-py) | SQLAlchemy 2.0 ORM (13 bảng P1+P2), Alembic migrations `0001`→`0004`, Neon SSL/pool normalizer, `gold_parity`, `Asia/Ho_Chi_Minh`, `seed.py` |
+| **REST & Audit API** | [`apps/api`](apps/api) | FastAPI `/api/v1/*` (nhẹ, không ML libs), Render [`entrypoint.sh`](apps/api/entrypoint.sh), hỗ trợ `db_poll` & `github_actions` dispatch |
+| **Worker & Forecasting** | [`apps/worker`](apps/worker) | 2-Tier Fetcher, 11 adapters VN thật, backfill lịch sử, macro & RSS engine, ML forecasting (`numpy`/`scikit-learn`), CLI & APScheduler |
+| **Web Dashboard** | [`apps/web`](apps/web) | Next.js 15 + Tailwind v4 + `lightweight-charts` v5 (`/` Bảng giá, `/forecast` Phân tích & Dự báo, `/audit` Kiểm toán & Modal thủ công) |
+| **CI / Workflows** | [`.github/workflows`](.github/workflows) | `ci.yml` (Lint, mypy, unit + PG integration, Next build, YAML check, Docker Buildx), `crawl-schedule.yml` (cron & on-demand), `backfill-history.yml` |
+| **Hướng dẫn Deploy** | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Quy trình từng bước triển khai Phase 1 + Phase 2 lên **Neon + GitHub Actions + Render Free + Vercel Hobby + cron-job.org** |
 
 ---
 
-## Danh sách 11 Nguồn Dữ liệu Thực tế đang Active
-
-| Nhóm | Mã nguồn (`code`) | Phân tầng | Chiến lược | Lịch quét (`UTC+7`) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Vàng** | `SJC_OFFICIAL_XML` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_JSON` | `00:15` hàng ngày (Production `ALL`) |
-| **Vàng** | `DOJI_BOARD` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
-| **Vàng** | `PNJ_HTML` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
-| **Vàng** | `CAFEF_GOLD_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_JSON` | `00:15` hàng ngày (Production `ALL`) |
-| **Xăng dầu** | `PETROLIMEX_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
-| **Xăng dầu** | `SAIGONPETRO_FUEL` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | `00:15` hàng ngày (Production `ALL`) |
-| **Xăng dầu** | `WEBGIA_FUEL_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` | `00:15` hàng ngày (Production `ALL`) |
-| **Gas** | `PETROLIMEX_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
-| **Gas** | `SAIGONPETRO_GAS` | Chính thống (`PRIMARY_OFFICIAL`) | `HTTP_HTML` (2 bước) | `00:15` hàng ngày (Production `ALL`) |
-| **Gas** | `PVGAS_LPG` | Chính thống (`PRIMARY_OFFICIAL`) | `PLAYWRIGHT_JS` | `00:15` hàng ngày (Production `ALL`) |
-| **Gas** | `VIETNAMBIZ_GAS_CROSSCHECK` | Đối chứng (`SECONDARY_CROSSCHECK`) | `HTTP_HTML` (2 bước) | `00:15` hàng ngày (Production `ALL`) |
-
-*(Trên Docker Compose local, `vxg_worker` chạy đầy đủ bộ 10 job APScheduler chi tiết hơn theo ngày trong tuần/giờ Việt Nam.)*
-
----
-
-## REST & Audit API Endpoints (`/api/v1/...`)
+## REST, Analytics, Forecast & Audit API Endpoints (`/api/v1/...`)
 
 | Method & Path | Bảo vệ | Mô tả |
 | :--- | :--- | :--- |
-| `GET /health`, `GET /ready` | Công khai | Liveness & Readiness probe kiểm tra PostgreSQL + catalog |
-| `GET /docs`, `GET /openapi.json` | Công khai | Swagger UI & OpenAPI schema |
-| `GET /api/v1/catalog` | Công khai | Danh sách thành phố (`HN`, `DN`, `HCM`), nhóm hàng, 18 mặt hàng, 11 nguồn active |
-| `GET /api/v1/prices/latest` | Công khai | Bảng giá `VERIFIED`/`CROSS_CHECKED` mới nhất (lọc `location`, `domain`; tự map `FUEL -> VUNG_1`) |
-| `GET /api/v1/prices/{record_id}/evidence` | Công khai | Toàn bộ bằng chứng nguồn gốc, SHA-256, mã phiên cào, kết quả đối chứng & 6 tầng kiểm tra |
-| `GET /api/v1/audit/summary` | Công khai | Chỉ số minh bạch theo ngày hôm nay (`UTC+7`) và 7 ngày gần nhất |
-| `GET /api/v1/audit/runs` | Công khai | Lịch sử các phiên cào (hỗ trợ phân trang `limit`/`offset`, lọc `scope`/`status`) |
-| `GET /api/v1/audit/runs/{run_id}` | Công khai | Log chi tiết từng nguồn (`crawl_source_logs`) trong một phiên cào |
-| `GET /api/v1/sources/health` | Công khai | Tỷ lệ thành công 7 ngày, độ trễ trung bình và trạng thái hiện tại của 11 nguồn active |
-| `GET /api/v1/audit/anomalies` | Công khai | Danh sách cảnh báo `anomaly_alerts` (`OPEN` / `ACKNOWLEDGED` / `RESOLVED`) |
-| `POST /api/v1/admin/crawl-runs` | `X-Admin-API-Key` | Tạo job `QUEUED` (`202` / `409 Conflict` / `502` nếu dispatch GitHub lỗi) |
+| `GET /health`, `GET /ready`, `GET /docs` | Công khai | Liveness/Readiness probe & Swagger UI / OpenAPI |
+| `GET /api/v1/catalog` | Công khai | Danh sách thành phố (`HN`, `DN`, `HCM`), 18 mặt hàng, 11 nguồn active |
+| `GET /api/v1/prices/latest` | Công khai | Bảng giá `VERIFIED`/`CROSS_CHECKED` mới nhất kèm `prev_change_vnd` & `prev_change_pct` |
+| `GET /api/v1/prices/{record_id}/evidence` | Công khai | Hồ sơ bằng chứng gốc, SHA-256, đối chiếu chéo & kết quả 6 tầng kiểm tra |
+| `GET /api/v1/prices/history` | Công khai | Chuỗi giá lịch sử chuẩn hóa từ `daily_price_series` (`30d \| 90d \| 1y \| 2y`) |
+| `GET /api/v1/analytics/macro` | Công khai | Chỉ số vĩ mô (`XAU_USD`, `BRENT_USD`, `WTI_USD`, `DXY`, tỷ giá USD/VND) & chênh lệch SJC/Thế giới |
+| `GET /api/v1/analytics/news` | Công khai | Tín hiệu tin tức RSS đã loại trùng, gắn mức tác động & catalysts |
+| `GET /api/v1/forecasts/latest` | Công khai | Snapshot dự báo mới nhất (`READY` + `INSUFFICIENT_DATA` minh bạch lý do) |
+| `GET /api/v1/forecasts/detail` | Công khai | Payload hợp nhất cho `/forecast` (dự báo + chuỗi giá lịch sử + vĩ mô nổi bật + tin tức) |
+| `GET /api/v1/audit/summary`, `runs`, `runs/{run_id}` | Công khai | Chỉ số minh bạch theo ngày & 7 ngày, lịch sử phiên cào và log từng nguồn |
+| `GET /api/v1/sources/health`, `GET /api/v1/audit/anomalies` | Công khai | Sức khỏe 7 ngày của 11 nguồn & danh sách cảnh báo bất thường |
+| `GET /api/v1/audit/forecasts` | Công khai | Độ chính xác dự báo tách biệt **`LIVE`** và **`BACKTEST`** so sánh `Naive Baseline` |
+| `POST /api/v1/admin/crawl-runs` | `X-Admin-API-Key` | Kích hoạt thủ công phiên thu thập giá (`202` / `409 Conflict` / `502`) |
+| `POST /api/v1/admin/forecast-runs` | `X-Admin-API-Key` | Kích hoạt thủ công phiên chấm điểm & chạy mô hình dự báo (`202` / `409` / `502`) |
 
 ---
 
 ## Chạy nhanh trên Local (Docker Compose)
 
 1. **Tạo file biến môi trường `.env` từ [`.env.example`](.env.example):**
-   - **Windows PowerShell:**
-     ```powershell
-     Copy-Item .env.example .env
-     ```
-   - **macOS / Linux:**
-     ```bash
-     cp .env.example .env
-     ```
+   - **Windows PowerShell:** `Copy-Item .env.example .env`
+   - **macOS / Linux:** `cp .env.example .env`
 2. **Khởi chạy toàn bộ 5 dịch vụ local (`postgres`, `migrator`, `api`, `worker`, `web`):**
    ```bash
    docker compose up --build -d
    ```
-3. **Nạp dữ liệu giá thực tế ngay lần đầu (không cần chờ khung giờ cron):**
+3. **Nạp dữ liệu giá thực tế & chuỗi phân tích Phase 2 ngay lần đầu:**
    ```bash
    docker compose exec worker python -m vxg_worker.cli run --scope ALL
+   docker compose exec worker python -m vxg_worker.cli backfill-history --domain ALL --months 24
+   docker compose exec worker python -m vxg_worker.cli rollup-daily
+   docker compose exec worker python -m vxg_worker.cli backfill-macro --months 24
+   docker compose exec worker python -m vxg_worker.cli sync-news --hours 72
+   docker compose exec worker python -m vxg_worker.cli backtest-forecasts --scope ALL
+   docker compose exec worker python -m vxg_worker.cli run-forecasts --scope ALL
    ```
-   *(Hoặc vào `http://localhost:3000/audit`, bấm **Chạy cào thủ công** và nhập khóa mặc định local `change-me-local-admin-key`.)*
+   *(Hoặc dùng các lệnh tương ứng trong [`Makefile`](Makefile): `make backfill`, `make backfill-macro`, `make sync-news`, `make backtest-forecasts`, `make run-forecasts`, `make evaluate-forecasts`.)*
 4. **Truy cập trên trình duyệt:**
-   - **Bảng giá hôm nay:** `http://localhost:3000` (hỗ trợ `?city=HN|DN|HCM`)
-   - **Minh bạch & Nhật ký cào:** `http://localhost:3000/audit`
+   - **Bảng giá hôm nay:** `http://localhost:3000`
+   - **Phân tích & Dự báo:** `http://localhost:3000/forecast`
+   - **Kiểm toán & Độ chính xác dự báo:** `http://localhost:3000/audit` (khóa mặc định local: `change-me-local-admin-key`)
    - **OpenAPI / Swagger UI:** `http://localhost:8000/docs`
 
 ---
@@ -132,10 +120,8 @@ pnpm --dir apps/web typecheck
 pnpm --dir apps/web build
 ```
 
-Hoặc sử dụng [`Makefile`](Makefile): `make up`, `make down`, `make test`, `make test-integration`, `make lint`, `make web-build`, `make prune-snapshots`.
-
 ---
 
 ## Triển khai 100% Miễn phí lên Cloud
 
-Xem hướng dẫn chi tiết từng bước cài đặt **Neon (PostgreSQL) + GitHub Actions (Worker) + Render Free (FastAPI) + Vercel Hobby (Next.js) + cron-job.org** tại [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+Xem hướng dẫn chi tiết từng bước cài đặt & nâng cấp Phase 2 lên **Neon + GitHub Actions + Render Free + Vercel Hobby + cron-job.org** tại [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).

@@ -1,7 +1,10 @@
+import { formatDirectionLabel, formatImpactLabel } from "@/lib/format";
 import type {
   AlertStatus,
   CrawlRunStatus,
   FetchStatus,
+  ForecastEvaluationType,
+  PredictedDirection,
   SourceHealthStatus,
   VerificationStatus,
 } from "@/lib/types";
@@ -158,6 +161,79 @@ export function AlertStatusBadge({ status }: { status: AlertStatus }) {
       dotClass="bg-rose-700"
       pillClass="border-rose-200 bg-rose-50/70 text-rose-700"
       label="Đang mở"
+    />
+  );
+}
+
+export function DirectionBadge({ direction }: { direction: PredictedDirection }) {
+  const styles: Record<PredictedDirection, BadgeStyle> = {
+    UP: {
+      dotClass: "bg-emerald-700",
+      pillClass: "border-emerald-200 bg-emerald-50/70 text-emerald-700",
+      label: formatDirectionLabel("UP"),
+    },
+    DOWN: {
+      dotClass: "bg-rose-700",
+      pillClass: "border-rose-200 bg-rose-50/70 text-rose-700",
+      label: formatDirectionLabel("DOWN"),
+    },
+    FLAT: {
+      dotClass: "bg-slate-500",
+      pillClass: "border-[#E2E8F0] bg-[#F8FAFC] text-[#475569]",
+      label: formatDirectionLabel("FLAT"),
+    },
+    UNKNOWN: {
+      dotClass: "bg-amber-700",
+      pillClass: "border-amber-200 bg-amber-50/70 text-amber-700",
+      label: formatDirectionLabel("UNKNOWN"),
+    },
+  };
+  return <StatusPill {...styles[direction]} />;
+}
+
+export function ImpactBadge({ level }: { level: string }) {
+  if (level === "HIGH") {
+    return (
+      <StatusPill
+        dotClass="bg-rose-700"
+        pillClass="border-rose-200 bg-rose-50/70 text-rose-700"
+        label={`Tác động: ${formatImpactLabel(level)}`}
+      />
+    );
+  }
+  if (level === "MEDIUM") {
+    return (
+      <StatusPill
+        dotClass="bg-amber-700"
+        pillClass="border-amber-200 bg-amber-50/70 text-amber-700"
+        label={`Tác động: ${formatImpactLabel(level)}`}
+      />
+    );
+  }
+  return (
+    <StatusPill
+      dotClass="bg-slate-500"
+      pillClass="border-[#E2E8F0] bg-[#F8FAFC] text-[#475569]"
+      label={`Tác động: ${formatImpactLabel(level)}`}
+    />
+  );
+}
+
+export function EvaluationTypeBadge({ type }: { type: ForecastEvaluationType }) {
+  if (type === "LIVE") {
+    return (
+      <StatusPill
+        dotClass="bg-emerald-700"
+        pillClass="border-emerald-200 bg-emerald-50/70 text-emerald-700"
+        label="LIVE"
+      />
+    );
+  }
+  return (
+    <StatusPill
+      dotClass="bg-slate-500"
+      pillClass="border-[#E2E8F0] bg-[#F8FAFC] text-[#475569]"
+      label="BACKTEST"
     />
   );
 }

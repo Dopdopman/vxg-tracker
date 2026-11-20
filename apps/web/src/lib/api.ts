@@ -1,5 +1,7 @@
 import type {
   AlertStatus,
+  AnomaliesResponse,
+  AuditForecastsResponse,
   AuditSummaryResponse,
   CatalogResponse,
   CityCode,
@@ -9,11 +11,22 @@ import type {
   CrawlRunStatus,
   CrawlScope,
   ErrorResponse,
+  ForecastDetailResponse,
+  ForecastEvaluationTypeFilter,
+  ForecastHorizon,
+  HistoryLocationCode,
+  HistoryRange,
+  LatestForecastsResponse,
   LatestPricesResponse,
+  MacroAnalyticsResponse,
+  MacroIndicatorCode,
+  NewsAnalyticsResponse,
+  NewsDomainFilter,
   PriceEvidenceResponse,
+  PriceHistoryResponse,
   SourcesHealthResponse,
   TriggerCrawlRunResponse,
-  AnomaliesResponse,
+  TriggerForecastRunResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -175,6 +188,132 @@ export async function triggerManualCrawlRun(
   adminKey: string
 ): Promise<TriggerCrawlRunResponse> {
   return apiFetch<TriggerCrawlRunResponse>("/api/v1/admin/crawl-runs", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-API-Key": adminKey,
+    },
+    body: JSON.stringify({ scope }),
+  });
+}
+
+export async function fetchPriceHistory(params: {
+  commodity_code: string;
+  location: HistoryLocationCode;
+  range?: HistoryRange;
+}): Promise<PriceHistoryResponse> {
+  const query = new URLSearchParams();
+  query.set("commodity_code", params.commodity_code);
+  query.set("location", params.location);
+  if (params.range) {
+    query.set("range", params.range);
+  }
+  return apiFetch<PriceHistoryResponse>(`/api/v1/prices/history?${query.toString()}`);
+}
+
+export async function fetchMacroAnalytics(params?: {
+  indicators?: MacroIndicatorCode[];
+  range?: HistoryRange;
+}): Promise<MacroAnalyticsResponse> {
+  const query = new URLSearchParams();
+  if (params?.indicators && params.indicators.length > 0) {
+    query.set("indicators", params.indicators.join(","));
+  }
+  if (params?.range) {
+    query.set("range", params.range);
+  }
+  const qs = query.toString();
+  return apiFetch<MacroAnalyticsResponse>(`/api/v1/analytics/macro${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchNewsAnalytics(params?: {
+  domain?: NewsDomainFilter;
+  hours?: 24 | 72 | 168;
+  limit?: number;
+}): Promise<NewsAnalyticsResponse> {
+  const query = new URLSearchParams();
+  if (params?.domain) {
+    query.set("domain", params.domain);
+  }
+  if (params?.hours !== undefined) {
+    query.set("hours", String(params.hours));
+  }
+  if (params?.limit !== undefined) {
+    query.set("limit", String(params.limit));
+  }
+  const qs = query.toString();
+  return apiFetch<NewsAnalyticsResponse>(`/api/v1/analytics/news${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchLatestForecasts(params?: {
+  domain?: CommodityCategory;
+  location?: CityCode;
+  horizon?: ForecastHorizon;
+}): Promise<LatestForecastsResponse> {
+  const query = new URLSearchParams();
+  if (params?.domain) {
+    query.set("domain", params.domain);
+  }
+  if (params?.location) {
+    query.set("location", params.location);
+  }
+  if (params?.horizon) {
+    query.set("horizon", params.horizon);
+  }
+  const qs = query.toString();
+  return apiFetch<LatestForecastsResponse>(`/api/v1/forecasts/latest${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchForecastDetail(params: {
+  commodity_code: string;
+  location: HistoryLocationCode;
+  horizon?: ForecastHorizon;
+  history_range?: HistoryRange;
+}): Promise<ForecastDetailResponse> {
+  const query = new URLSearchParams();
+  query.set("commodity_code", params.commodity_code);
+  query.set("location", params.location);
+  if (params.horizon) {
+    query.set("horizon", params.horizon);
+  }
+  if (params.history_range) {
+    query.set("history_range", params.history_range);
+  }
+  return apiFetch<ForecastDetailResponse>(`/api/v1/forecasts/detail?${query.toString()}`);
+}
+
+export async function fetchAuditForecasts(params?: {
+  evaluation_type?: ForecastEvaluationTypeFilter;
+  domain?: CommodityCategory;
+  horizon?: ForecastHorizon;
+  limit?: number;
+  offset?: number;
+}): Promise<AuditForecastsResponse> {
+  const query = new URLSearchParams();
+  if (params?.evaluation_type) {
+    query.set("evaluation_type", params.evaluation_type);
+  }
+  if (params?.domain) {
+    query.set("domain", params.domain);
+  }
+  if (params?.horizon) {
+    query.set("horizon", params.horizon);
+  }
+  if (params?.limit !== undefined) {
+    query.set("limit", String(params.limit));
+  }
+  if (params?.offset !== undefined) {
+    query.set("offset", String(params.offset));
+  }
+  const qs = query.toString();
+  return apiFetch<AuditForecastsResponse>(`/api/v1/audit/forecasts${qs ? `?${qs}` : ""}`);
+}
+
+export async function triggerManualForecastRun(
+  scope: CrawlScope,
+  adminKey: string
+): Promise<TriggerForecastRunResponse> {
+  return apiFetch<TriggerForecastRunResponse>("/api/v1/admin/forecast-runs", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

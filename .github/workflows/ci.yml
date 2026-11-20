@@ -38,7 +38,19 @@ jobs:
             -e ./packages/shared-py \
             -e ./apps/api \
             -e ./apps/worker \
-            ruff mypy pytest pytest-asyncio
+            pyyaml ruff mypy pytest pytest-asyncio
+
+      - name: Validate GitHub Actions workflow YAML files
+        run: |
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          for wf in sorted(Path(".github/workflows").glob("*.yml")):
+              data = yaml.safe_load(wf.read_text(encoding="utf-8"))
+              assert isinstance(data, dict) and "jobs" in data, f"Invalid workflow YAML: {wf}"
+              print(f"Validated YAML: {wf}")
+          PY
 
       - name: Run Ruff linter
         run: .venv/bin/ruff check packages apps/api apps/worker tests
@@ -176,7 +188,7 @@ jobs:
 
       - name: Verify no secret leakage in .next/static bundle
         run: |
-          if grep -rniE "ADMIN_API_KEY|change-me-local-admin-key" apps/web/.next/static; then
+          if grep -rniE "ADMIN_API_KEY|GEMINI_API_KEY|GITHUB_DISPATCH_TOKEN|change-me-local-admin-key" apps/web/.next/static; then
             echo "ERROR: Sensitive admin secret reference leaked into client bundle!"
             exit 1
           fi

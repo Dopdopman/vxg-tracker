@@ -1,12 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { ChevronRight, RefreshCw } from "lucide-react";
+import { ArrowUpRight, ChevronRight, RefreshCw } from "lucide-react";
 import { fetchLatestPrices } from "@/lib/api";
 import {
   formatBrandLabel,
   formatCityName,
+  formatSignedPercent,
+  formatSignedVnd,
   formatVnDate,
   formatVnDateTime,
   formatVnd,
@@ -136,15 +139,48 @@ export function PricesDashboard({
   const renderGasEffective = (item: LatestPriceItem) =>
     item.published_at_vn ? formatVnDateTime(item.published_at_vn) : formatVnDate(item.effective_date);
 
+  const renderPrevChange = (
+    changeVnd: number | null | undefined,
+    changePct: number | null | undefined,
+    divisor = 1
+  ) => {
+    if (changeVnd === null || changeVnd === undefined) {
+      return null;
+    }
+    const colorClass =
+      changeVnd > 0 ? "text-emerald-700" : changeVnd < 0 ? "text-rose-700" : "text-[#64748B]";
+    const pctText =
+      changePct !== null && changePct !== undefined ? ` (${formatSignedPercent(changePct, 2)})` : "";
+    return (
+      <p className={`tabular-nums mt-0.5 text-[11px] font-medium ${colorClass}`}>
+        {formatSignedVnd(changeVnd, { divisor })}
+        {pctText}
+      </p>
+    );
+  };
+
+  const forecastHref = `/forecast?city=${selectedCity}${
+    selectedDomain !== "ALL" ? `&domain=${selectedDomain}` : ""
+  }`;
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A]">
       <SiteHeader lastUpdatedVn={data?.last_updated_vn ?? null} />
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
         <div className="mb-6 border-b border-[#E2E8F0] pb-6">
-          <h1 className="text-2xl font-semibold tracking-tight text-[#0F172A]">
-            Bảng giá hàng hóa thiết yếu hôm nay
-          </h1>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h1 className="text-2xl font-semibold tracking-tight text-[#0F172A]">
+              Bảng giá hàng hóa thiết yếu hôm nay
+            </h1>
+            <Link
+              href={forecastHref}
+              className="inline-flex items-center gap-1 text-xs font-medium text-[#475569] underline decoration-[#CBD5E1] underline-offset-4 transition-colors hover:text-[#0F172A] hover:decoration-[#0F172A]"
+            >
+              <span>Phân tích xu hướng &amp; dự báo</span>
+              <ArrowUpRight className="h-3.5 w-3.5" strokeWidth={1.75} />
+            </Link>
+          </div>
           <p className="mt-1 text-sm text-[#475569]">
             Số liệu niêm yết chính thức từ các doanh nghiệp đầu mối tại Việt Nam, đã qua kiểm chứng
             6 tầng an toàn. Bấm vào từng dòng để xem nguồn gốc &amp; bằng chứng.
@@ -308,7 +344,12 @@ export function PricesDashboard({
                               {formatVnd(item.buy_price, { divisor: goldDivisor })}
                             </td>
                             <td className="tabular-nums px-5 py-3.5 text-right font-semibold text-[#0F172A]">
-                              {formatVnd(item.sell_price, { divisor: goldDivisor })}
+                              <p>{formatVnd(item.sell_price, { divisor: goldDivisor })}</p>
+                              {renderPrevChange(
+                                item.prev_change_vnd,
+                                item.prev_change_pct,
+                                goldDivisor
+                              )}
                             </td>
                             <td className="tabular-nums px-5 py-3.5 text-right text-[#475569]">
                               {formatVnd(spread, { divisor: goldDivisor })}
@@ -388,7 +429,8 @@ export function PricesDashboard({
                             {formatBrandLabel(item.brand)}
                           </td>
                           <td className="tabular-nums px-5 py-3.5 text-right font-semibold text-[#0F172A]">
-                            {formatVnd(item.retail_price)}
+                            <p>{formatVnd(item.retail_price)}</p>
+                            {renderPrevChange(item.prev_change_vnd, item.prev_change_pct)}
                           </td>
                           <td className="tabular-nums px-5 py-3.5 text-right text-xs text-[#475569]">
                             {renderFuelEffective(item)}
@@ -464,7 +506,8 @@ export function PricesDashboard({
                             )}
                           </td>
                           <td className="tabular-nums px-5 py-3.5 text-right font-semibold text-[#0F172A]">
-                            {formatVnd(item.retail_price)}
+                            <p>{formatVnd(item.retail_price)}</p>
+                            {renderPrevChange(item.prev_change_vnd, item.prev_change_pct)}
                           </td>
                           <td className="tabular-nums px-5 py-3.5 text-right text-xs text-[#475569]">
                             {renderGasEffective(item)}

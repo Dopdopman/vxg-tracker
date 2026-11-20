@@ -4,6 +4,10 @@ import type {
   CityCode,
   CommodityCategory,
   CrawlScope,
+  ForecastHorizon,
+  HistoryRange,
+  NewsImpactLevel,
+  PredictedDirection,
   TriggerType,
 } from "./types";
 
@@ -219,5 +223,110 @@ const SEVERITY_LABELS: Record<AlertSeverity, string> = {
 
 export function formatSeverityLabel(severity: AlertSeverity): string {
   return SEVERITY_LABELS[severity];
+}
+
+export function formatSignedVnd(
+  delta: number | null | undefined,
+  options?: { divisor?: number; includeSymbol?: boolean }
+): string {
+  if (delta === null || delta === undefined || Number.isNaN(delta)) {
+    return "—";
+  }
+  const divisor = options?.divisor ?? 1;
+  const scaled = Math.round(delta / divisor);
+  if (scaled === 0) {
+    return options?.includeSymbol === false ? "0" : "0 ₫";
+  }
+  const sign = scaled > 0 ? "+" : "-";
+  const text = formatIntegerWithDots(Math.abs(scaled));
+  return options?.includeSymbol === false ? `${sign}${text}` : `${sign}${text} ₫`;
+}
+
+export function formatSignedPercent(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "—";
+  }
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(digits)}%`;
+}
+
+const HORIZON_LABELS: Record<ForecastHorizon, string> = {
+  T_PLUS_1: "T+1 (1 ngày)",
+  T_PLUS_7: "T+7 (7 ngày)",
+  NEXT_FUEL_CYCLE: "Kỳ điều hành tới",
+  NEXT_GAS_MONTH: "Kỳ đầu tháng tới",
+};
+
+export function formatHorizonLabel(horizon: ForecastHorizon): string {
+  return HORIZON_LABELS[horizon];
+}
+
+const DIRECTION_LABELS: Record<PredictedDirection, string> = {
+  UP: "Xu hướng tăng",
+  DOWN: "Xu hướng giảm",
+  FLAT: "Đi ngang",
+  UNKNOWN: "Chưa đủ dữ liệu",
+};
+
+export function formatDirectionLabel(direction: PredictedDirection): string {
+  return DIRECTION_LABELS[direction];
+}
+
+const IMPACT_LABELS: Record<NewsImpactLevel, string> = {
+  HIGH: "Cao",
+  MEDIUM: "Trung bình",
+  LOW: "Thấp",
+};
+
+export function formatImpactLabel(level: string): string {
+  if (level in IMPACT_LABELS) {
+    return IMPACT_LABELS[level as NewsImpactLevel];
+  }
+  return level;
+}
+
+const CATALYST_LABELS: Record<string, string> = {
+  FED_RATE: "Lãi suất Fed",
+  OPEC_SUPPLY: "Nguồn cung OPEC+",
+  GEOPOLITICAL: "Địa chính trị",
+  USD_FX: "Tỷ giá USD",
+  CP_ARAMCO: "Giá CP Aramco",
+  VN_POLICY: "Điều hành trong nước",
+  INFLATION: "Lạm phát",
+  INVENTORY: "Tồn kho năng lượng",
+};
+
+export function formatCatalystLabel(code: string): string {
+  return CATALYST_LABELS[code] ?? code;
+}
+
+const RANGE_LABELS: Record<HistoryRange, string> = {
+  "30d": "30N",
+  "90d": "90N",
+  "1y": "1N",
+  "2y": "2N",
+};
+
+export function formatRangeLabel(range: HistoryRange): string {
+  return RANGE_LABELS[range];
+}
+
+export function formatMacroValue(value: number | null | undefined, unit: string): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "—";
+  }
+  if (unit.includes("VND")) {
+    return `${formatIntegerWithDots(value)} ₫`;
+  }
+  if (unit.includes("USD")) {
+    return `$${value.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+  if (unit === "PCT") {
+    return formatSignedPercent(value, 2);
+  }
+  return value.toFixed(2);
 }
 
